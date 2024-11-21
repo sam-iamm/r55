@@ -47,7 +47,7 @@ pub fn run_tx(db: &mut InMemoryDB, addr: &Address, calldata: Vec<u8>) -> Result<
     let mut evm = Evm::builder()
         .with_db(db)
         .modify_tx_env(|tx| {
-            tx.caller = address!("0000000000000000000000000000000000000007");
+            tx.caller = address!("0000000000000000000000000000000000000001");
             tx.transact_to = TransactTo::Call(*addr);
             tx.data = calldata.into();
             tx.value = U256::from(0);
@@ -192,7 +192,11 @@ fn execute_riscv(
                         let key: u64 = emu.cpu.xregs.read(10);
                         match host.sload(interpreter.contract.target_address, U256::from(key)) {
                             Some((value, _is_cold)) => {
-                                emu.cpu.xregs.write(10, value.as_limbs()[0]);
+                                let limbs = value.as_limbs();
+                                emu.cpu.xregs.write(10, limbs[0]);
+                                emu.cpu.xregs.write(11, limbs[1]);
+                                emu.cpu.xregs.write(12, limbs[2]);
+                                emu.cpu.xregs.write(13, limbs[3]);
                             }
                             _ => {
                                 return return_revert(interpreter);
@@ -201,11 +205,14 @@ fn execute_riscv(
                     }
                     Syscall::SStore => {
                         let key: u64 = emu.cpu.xregs.read(10);
-                        let value: u64 = emu.cpu.xregs.read(11);
+                        let first: u64 = emu.cpu.xregs.read(11);
+                        let second: u64 = emu.cpu.xregs.read(12);
+                        let third: u64 = emu.cpu.xregs.read(13);
+                        let fourth: u64 = emu.cpu.xregs.read(14);
                         host.sstore(
                             interpreter.contract.target_address,
                             U256::from(key),
-                            U256::from(value),
+                            U256::from_limbs([first, second, third, fourth]),
                         );
                     }
                     Syscall::Call => {
