@@ -13,6 +13,7 @@ use revm::{
     primitives::{address, keccak256, ruint::Uint, AccountInfo, Address, Bytecode, Bytes, U256},
     InMemoryDB,
 };
+use alloy_core::hex;
 
 fn compile_runtime(path: &str) -> eyre::Result<Vec<u8>> {
     println!("Compiling runtime: {}", path);
@@ -221,7 +222,61 @@ fn test_deploy() -> eyre::Result<()> {
     Ok(())
 }
 
+fn test_transfer_logs() -> eyre::Result<()> {
+    let rv_bytecode = compile_runtime("erc20")?;
+    const CONTRACT_ADDR: Address = address!("0d4a11d5EEaaC28EC3F61d100daF4d40471f1852");
+    let mut db = InMemoryDB::default();
+
+    // Setup contract
+    let mut bytecode = vec![0xff];
+    bytecode.extend_from_slice(&rv_bytecode);
+    add_contract_to_db(&mut db, CONTRACT_ADDR, Bytes::from(bytecode));
+
+    // Setup addresses
+    let alice: Address = address!("0000000000000000000000000000000000000001");
+    let bob: Address = address!("0000000000000000000000000000000000000002");
+
+    // Add balance to Alice's account for gas fees
+    add_balance_to_db(&mut db, alice, 1e18 as u64);
+
+    // Mint tokens to Alice
+    let selector_mint = &keccak256("mint")[0..4];
+    let mut calldata_mint = (alice, 100u64).abi_encode();
+    let mut complete_mint_calldata = selector_mint.to_vec();
+    complete_mint_calldata.append(&mut calldata_mint);
+    
+    let mint_result = run_tx(&mut db, &CONTRACT_ADDR, complete_mint_calldata)?;
+    println!("Mint result status: {}", mint_result.status);
+
+    println!("\n=== Transfer Logs Test ===");
+    println!("Expected Transfer Event:");
+    println!("- From: {}", alice);
+    println!("- To: {}", bob);
+    println!("- Amount: 50 tokens");
+
+    let selector_transfer = &keccak256("transfer")[0..4];
+    let mut calldata_transfer = (bob, 50u64).abi_encode();
+    let mut complete_transfer_calldata = selector_transfer.to_vec();
+    complete_transfer_calldata.append(&mut calldata_transfer);
+    
+    let transfer_result = run_tx(&mut db, &CONTRACT_ADDR, complete_transfer_calldata)?;
+    
+    println!("\nActual Transfer Log:");
+    if let Some(log) = transfer_result.logs.first() {
+        let topics = log.data.topics();
+        println!("- Event Hash: {}", hex::encode(topics[0]));
+        println!("- From: 0x{}", hex::encode(&topics[1][12..]));
+        println!("- To: 0x{}", hex::encode(&topics[2][12..]));
+        let amount = u64::from_be_bytes(log.data.data[24..32].try_into().unwrap());
+        println!("- Amount: {} tokens", amount);
+    }
+    
+    Ok(())
+}
+
+
 fn main() -> eyre::Result<()> {
     test_runtime_from_binary()?;
-    test_deploy()
+    test_deploy();
+    test_transfer_logs()
 }

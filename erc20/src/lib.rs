@@ -3,7 +3,7 @@
 
 use core::default::Default;
 
-use contract_derive::{contract, payable};
+use contract_derive::{contract, payable, Event};
 use eth_riscv_runtime::types::Mapping;
 
 use alloy_core::primitives::{Address, address, U256};
@@ -21,6 +21,24 @@ pub struct ERC20 {
     decimals: u8,
 }
 
+#[derive(Event)]
+pub struct Transfer {
+    #[indexed]
+    pub from: Address,
+    #[indexed]
+    pub to: Address,
+    pub value: u64
+}
+
+#[derive(Event)]
+pub struct Mint {
+    #[indexed]
+    pub from: Address,
+    #[indexed]
+    pub to: Address,
+    pub value: u64
+}
+
 #[contract]
 impl ERC20 {
     pub fn balance_of(&self, owner: Address) -> u64 {
@@ -31,6 +49,7 @@ impl ERC20 {
         let from = msg_sender();
         let from_balance = self.balances.read(from);
         let to_balance = self.balances.read(to);
+
         if from == to || from_balance < value {
             revert();
         }
@@ -38,6 +57,7 @@ impl ERC20 {
         self.balances.write(from, from_balance - value);
         self.balances.write(to, to_balance + value);
 
+        log::emit(Transfer::new(from, to, value));
         true
     }
 
@@ -67,10 +87,13 @@ impl ERC20 {
         self.allowances.read(owner).read(spender)
     }
 
-    pub fn mint(&self, to: Address, value: u64) {
+    #[payable]
+    pub fn mint(&self, to: Address, value: u64) -> bool {
         let owner = msg_sender();
+
         let to_balance = self.balances.read(to);
         self.balances.write(to, to_balance + value);
+        log::emit(Transfer::new(0, to, value));
+        true
     }
-
 }

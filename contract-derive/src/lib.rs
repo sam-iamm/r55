@@ -2,8 +2,88 @@ extern crate proc_macro;
 use alloy_core::primitives::keccak256;
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, ImplItem, ItemImpl};
+use syn::{parse_macro_input, ImplItem, ItemImpl, DeriveInput, Data, Fields};
 use syn::{FnArg, ReturnType};
+
+#[proc_macro_derive(Event, attributes(indexed))]
+pub fn event_derive(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+    
+    let fields = if let Data::Struct(data) = &input.data {
+        if let Fields::Named(fields) = &data.fields {
+            &fields.named
+        } else {
+            panic!("Event must have named fields");
+        }
+    } else {
+        panic!("Event must be a struct");
+    };
+
+    // Collect iterators into vectors
+    let field_names: Vec<_> = fields.iter().map(|f| &f.ident).collect();
+    let field_types: Vec<_> = fields.iter().map(|f| &f.ty).collect();
+    let indexed_fields: Vec<_> = fields
+        .iter()
+        .filter(|f| {
+            f.attrs.iter().any(|attr| attr.path.is_ident("indexed"))
+        })
+        .map(|f| &f.ident)
+        .collect();
+
+    let expanded = quote! {
+        impl #name {
+            const NAME: &'static str = stringify!(#name);
+            const INDEXED_FIELDS: &'static [&'static str] = &[
+                #(stringify!(#indexed_fields)),*
+            ];
+
+            pub fn new(#(#field_names: #field_types),*) -> Self {
+                Self {
+                    #(#field_names),*
+                }
+            }
+        }
+
+        impl eth_riscv_runtime::log::Event for #name {
+            fn encode_log(&self) -> (alloc::vec::Vec<u8>, alloc::vec::Vec<[u8; 32]>) {
+                use alloy_sol_types::SolValue;
+                use alloy_core::primitives::{keccak256, B256};
+                use alloc::vec::Vec;
+
+                let mut signature = Vec::new();
+                signature.extend_from_slice(Self::NAME.as_bytes());
+                signature.extend_from_slice(b"(");
+
+                let mut first = true;
+                let mut topics = alloc::vec![B256::default()];
+                let mut data = Vec::new();
+
+                #(
+                    if !first { signature.extend_from_slice(b","); }
+                    first = false;
+                    
+                    signature.extend_from_slice(self.#field_names.sol_type_name().as_bytes());
+                    let encoded = self.#field_names.abi_encode();
+
+                    let field_name = stringify!(#field_names);
+                    if Self::INDEXED_FIELDS.contains(&field_name) && topics.len() < 4 {
+                        topics.push(B256::from_slice(&encoded));
+                    } else {
+                        data.extend_from_slice(&encoded);
+                    }
+                )*
+
+                signature.extend_from_slice(b")");
+                topics[0] = B256::from(keccak256(&signature));
+
+                (data, topics.iter().map(|t| t.0).collect())
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
 
 #[proc_macro_attribute]
 pub fn show_streams(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -87,11 +167,63 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }).collect();
 
+    let emit_helper = quote! {
+        #[macro_export]
+        macro_rules! get_type_signature {
+            ($arg:expr) => {
+                $arg.sol_type_name().as_bytes()
+            };
+        }
+    
+        #[macro_export]
+        macro_rules! emit {
+            ($event:ident, $($field:expr),*) => {{
+                use alloy_sol_types::SolValue;
+                use alloy_core::primitives::{keccak256, B256, U256, I256};
+                use alloc::vec::Vec;
+                
+                let mut signature = alloc::vec![];
+                signature.extend_from_slice($event::NAME.as_bytes());
+                signature.extend_from_slice(b"(");
+                
+                let mut first = true;
+                let mut topics = alloc::vec![B256::default()];
+                let mut data = Vec::new();
+                
+                $(
+                    if !first { signature.extend_from_slice(b","); }
+                    first = false;
+                    
+                    signature.extend_from_slice(get_type_signature!($field));
+                    let encoded = $field.abi_encode();
+                    
+                    let field_ident = stringify!($field);
+                    if $event::INDEXED_FIELDS.contains(&field_ident) && topics.len() < 4 {
+                        topics.push(B256::from_slice(&encoded));
+                    } else {
+                        data.extend_from_slice(&encoded);
+                    }
+                )*
+                
+                signature.extend_from_slice(b")");
+                topics[0] = B256::from(keccak256(&signature));
+                
+                if !data.is_empty() {
+                    eth_riscv_runtime::emit_log(&data, &topics);
+                } else if topics.len() > 1 {
+                    let data = topics.pop().unwrap();
+                    eth_riscv_runtime::emit_log(data.as_ref(), &topics);
+                }
+            }};
+        }
+    };
+
     // Generate the call method implementation
     let call_method = quote! {
         use alloy_sol_types::SolValue;
         use eth_riscv_runtime::*;
 
+        #emit_helper
         impl Contract for #struct_name {
             fn call(&self) {
                 self.call_with_data(&msg_data());

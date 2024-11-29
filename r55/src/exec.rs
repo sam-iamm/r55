@@ -8,13 +8,13 @@ use revm::{
         CallInputs, CallScheme, CallValue, Host, InstructionResult, Interpreter, InterpreterAction,
         InterpreterResult, SharedMemory,
     },
-    primitives::{address, Address, Bytes, ExecutionResult, Output, TransactTo, U256},
+    primitives::{address, Address, Bytes, ExecutionResult, Output, TransactTo, U256, B256, Log},
     Database, Evm, Frame, FrameOrResult, InMemoryDB,
 };
 use rvemu::{emulator::Emulator, exception::Exception};
 use std::{rc::Rc, sync::Arc};
 
-use super::error::{Error, Result};
+use super::error::{Error, Result, TxResult};
 
 pub fn deploy_contract(db: &mut InMemoryDB, bytecode: Bytes) -> Result<Address> {
     let mut evm = Evm::builder()
@@ -43,7 +43,7 @@ pub fn deploy_contract(db: &mut InMemoryDB, bytecode: Bytes) -> Result<Address> 
     }
 }
 
-pub fn run_tx(db: &mut InMemoryDB, addr: &Address, calldata: Vec<u8>) -> Result<()> {
+pub fn run_tx(db: &mut InMemoryDB, addr: &Address, calldata: Vec<u8>) -> Result<TxResult> {
     let mut evm = Evm::builder()
         .with_db(db)
         .modify_tx_env(|tx| {
@@ -61,11 +61,20 @@ pub fn run_tx(db: &mut InMemoryDB, addr: &Address, calldata: Vec<u8>) -> Result<
 
     match result {
         ExecutionResult::Success {
+            reason,
+            gas_used,
+            gas_refunded: _,
+            logs,
             output: Output::Call(value),
             ..
         } => {
             println!("Tx result: {:?}", value);
-            Ok(())
+            Ok(TxResult {
+                output: value.into(),
+                logs,
+                gas_used,
+                status: true,
+            })
         }
         result => Err(Error::UnexpectedExecResult(result)),
     }
@@ -364,6 +373,37 @@ fn execute_riscv(
                         padded_bytes[..4].copy_from_slice(&origin_bytes[16..20]);
                         let third_u64 = u64::from_be_bytes(padded_bytes);
                         emu.cpu.xregs.write(12, third_u64);
+                    }
+                    Syscall::Log => {
+                        let data_ptr: u64 = emu.cpu.xregs.read(10);
+                        let data_size: u64 = emu.cpu.xregs.read(11);
+                        let topics_ptr: u64 = emu.cpu.xregs.read(12);
+                        let topics_size: u64 = emu.cpu.xregs.read(13);
+                    
+                        // Read data
+                        let data_slice = match emu.cpu.bus.get_dram_slice(data_ptr..(data_ptr + data_size)) {
+                            Ok(slice) => slice,
+                            Err(_) => &mut[],
+                        };
+                        let data = data_slice.to_vec();
+                    
+                        // Read topics
+                        let topics_start = topics_ptr;
+                        let topics_end = topics_ptr + topics_size * 32;
+                        let topics_slice = match emu.cpu.bus.get_dram_slice(topics_start..topics_end) {
+                            Ok(slice) => slice,
+                            Err(_) => &mut[], 
+                        };
+                        let topics = topics_slice
+                            .chunks(32)
+                            .map(|chunk| B256::from_slice(chunk))
+                            .collect::<Vec<B256>>();
+                    
+                        host.log(Log::new_unchecked(
+                            interpreter.contract.target_address,
+                            topics,
+                            data.into(),
+                        ));
                     }
                 }
             }

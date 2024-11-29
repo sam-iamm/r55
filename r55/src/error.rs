@@ -1,12 +1,20 @@
 //! R55 crate errors
 
 use revm::{
-    primitives::{EVMError, ExecutionResult},
+    primitives::{EVMError, ExecutionResult, Log},
     Database, InMemoryDB,
 };
 use rvemu::exception::Exception;
 
 pub type Result<T> = core::result::Result<T, Error>;
+
+#[derive(Debug)]
+pub struct TxResult {
+    pub output: Vec<u8>,
+    pub logs: Vec<Log>,
+    pub gas_used: u64,
+    pub status: bool,
+}
 
 /// Error encountered on RISC-V execution
 #[allow(clippy::enum_variant_names)]
