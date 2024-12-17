@@ -13,14 +13,19 @@ use revm::{
 };
 use rvemu::{emulator::Emulator, exception::Exception};
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
+use tracing::{debug, trace, warn};
 
 use super::error::{Error, Result, TxResult};
+use super::gas;
+use super::syscall_gas;
+
+const R5_REST_OF_RAM_INIT: u64 = 0x80300000; // Defined at `r5-rust-rt.x`
 
 pub fn deploy_contract(db: &mut InMemoryDB, bytecode: Bytes) -> Result<Address> {
     let mut evm = Evm::builder()
         .with_db(db)
         .modify_tx_env(|tx| {
-            tx.caller = address!("0000000000000000000000000000000000000001");
+            tx.caller = address!("000000000000000000000000000000000000000A");
             tx.transact_to = TransactTo::Create;
             tx.data = bytecode;
             tx.value = U256::from(0);
@@ -36,7 +41,7 @@ pub fn deploy_contract(db: &mut InMemoryDB, bytecode: Bytes) -> Result<Address> 
             output: Output::Create(_value, Some(addr)),
             ..
         } => {
-            println!("Deployed at addr: {:?}", addr);
+            debug!("Deployed at addr: {:?}", addr);
             Ok(addr)
         }
         result => Err(Error::UnexpectedExecResult(result)),
@@ -47,7 +52,7 @@ pub fn run_tx(db: &mut InMemoryDB, addr: &Address, calldata: Vec<u8>) -> Result<
     let mut evm = Evm::builder()
         .with_db(db)
         .modify_tx_env(|tx| {
-            tx.caller = address!("0000000000000000000000000000000000000001");
+            tx.caller = address!("000000000000000000000000000000000000000A");
             tx.transact_to = TransactTo::Call(*addr);
             tx.data = calldata.into();
             tx.value = U256::from(0);
@@ -68,7 +73,7 @@ pub fn run_tx(db: &mut InMemoryDB, addr: &Address, calldata: Vec<u8>) -> Result<
             output: Output::Call(value),
             ..
         } => {
-            println!("Tx result: {:?}", value);
+            debug!("Tx result: {:?}", value);
             Ok(TxResult {
                 output: value.into(),
                 logs,
@@ -99,7 +104,7 @@ fn riscv_context(frame: &Frame) -> Option<RVEmu> {
             returned_data_destiny: None,
         }),
         Err(err) => {
-            println!("Failed to setup from ELF: {err}");
+            warn!("Failed to setup from ELF: {err}");
             None
         }
     }
@@ -133,16 +138,61 @@ pub fn handle_register<EXT, DB: Database>(handler: &mut EvmHandler<'_, EXT, DB>)
     // execute riscv context or old logic.
     let old_handle = handler.execution.execute_frame.clone();
     handler.execution.execute_frame = Arc::new(move |frame, memory, instraction_table, ctx| {
-        let result = if let Some(Some(riscv_context)) = call_stack.borrow_mut().first_mut() {
+        let depth = call_stack.borrow().len() - 1;
+
+        // use last frame as stack is LIFO
+        let mut result = if let Some(Some(riscv_context)) = call_stack.borrow_mut().last_mut() {
+            debug!(
+                "=== [FRAME-{}] Contract: {} ============-",
+                depth,
+                frame.interpreter().contract.target_address,
+            );
             execute_riscv(riscv_context, frame.interpreter_mut(), memory, ctx)?
         } else {
+            debug!("=== [OLD Handler] ==================--");
             old_handle(frame, memory, instraction_table, ctx)?
         };
 
-        // if it is return pop the stack.
+        // if action is return, pop the stack.
         if result.is_return() {
             call_stack.borrow_mut().pop();
+
+            let is_last = call_stack.borrow().is_empty();
+            debug!(
+                "=== [FRAME-{}] Ouput: RETURN {}",
+                depth,
+                if is_last { "(last)" } else { "" }
+            );
+
+            if !is_last {
+                if let Some(Some(parent)) = call_stack.borrow_mut().last_mut() {
+                    if let Some(return_range) = &parent.returned_data_destiny {
+                        if let InterpreterAction::Return { result: res } = &mut result {
+                            // get allocated memory slice
+                            let return_memory = parent
+                                .emu
+                                .cpu
+                                .bus
+                                .get_dram_slice(return_range.clone())
+                                .expect("unable to get memory from return range");
+
+                            debug!("- Return data: {:?}", res.output);
+                            debug!("- Memory range: {:?}", return_range);
+                            debug!("- Memory size: {}", return_memory.len());
+
+                            // write return data to parent's memory
+                            if res.output.len() == return_memory.len() {
+                                return_memory.copy_from_slice(&res.output);
+                            } else {
+                                warn!("Unexpected return data size!");
+                            }
+                        }
+                    }
+                }
+            }
         }
+        debug!("=== [Frame-{}] {:#?}", depth, frame.interpreter().gas);
+
         Ok(result)
     });
 }
@@ -150,15 +200,27 @@ pub fn handle_register<EXT, DB: Database>(handler: &mut EvmHandler<'_, EXT, DB>)
 fn execute_riscv(
     rvemu: &mut RVEmu,
     interpreter: &mut Interpreter,
-    shared_memory: &mut SharedMemory,
+    _shared_memory: &mut SharedMemory,
     host: &mut dyn Host,
 ) -> Result<InterpreterAction> {
+    debug!(
+        "{} RISC-V execution:  PC: {:#x}  Return data dst: {:#?}",
+        if rvemu.emu.cpu.pc == R5_REST_OF_RAM_INIT {
+            "Starting"
+        } else {
+            "Resuming"
+        },
+        rvemu.emu.cpu.pc,
+        &rvemu.returned_data_destiny
+    );
+
     let emu = &mut rvemu.emu;
     emu.cpu.is_count = true;
+
     let returned_data_destiny = &mut rvemu.returned_data_destiny;
     if let Some(destiny) = std::mem::take(returned_data_destiny) {
         let data = emu.cpu.bus.get_dram_slice(destiny)?;
-        data.copy_from_slice(shared_memory.slice(0, data.len()))
+        debug!("Loaded return data: {}", Bytes::copy_from_slice(data));
     }
 
     let return_revert = |interpreter: &mut Interpreter, gas_used: u64| {
@@ -172,8 +234,7 @@ fn execute_riscv(
             },
         })
     };
-    // Tracks gas usage across EVM host calls
-    let mut evm_gas = 0;
+
     // Run emulator and capture ecalls
     loop {
         let run_result = emu.start();
@@ -182,9 +243,10 @@ fn execute_riscv(
                 let t0: u64 = emu.cpu.xregs.read(5);
 
                 let Ok(syscall) = Syscall::try_from(t0 as u8) else {
-                    println!("Unhandled syscall: {:?}", t0);
-                    return return_revert(interpreter, evm_gas);
+                    warn!("Unhandled syscall: {:?}", t0);
+                    return return_revert(interpreter, interpreter.gas.spent());
                 };
+                debug!("[Syscall::{} - {:#04x}]", syscall, t0);
 
                 match syscall {
                     Syscall::Return => {
@@ -192,23 +254,12 @@ fn execute_riscv(
                         let ret_size: u64 = emu.cpu.xregs.read(11);
 
                         let r55_gas = r55_gas_used(&emu.cpu.inst_counter);
-                        let data_bytes = dram_slice(emu, ret_offset, ret_size)?;
+                        debug!("> Total R55 gas: {}", r55_gas);
 
-                        let total_cost = r55_gas + evm_gas;
-                        println!(
-                            "evm gas: {}, r55 gas: {}, total cost: {}",
-                            evm_gas, r55_gas, total_cost
-                        );
-                        let in_limit = interpreter.gas.record_cost(total_cost);
-                        if !in_limit {
-                            return Ok(InterpreterAction::Return {
-                                result: InterpreterResult {
-                                    result: InstructionResult::OutOfGas,
-                                    output: Bytes::new(),
-                                    gas: interpreter.gas,
-                                },
-                            });
-                        }
+                        // RETURN logs the gas of the whole risc-v instruction set
+                        syscall_gas!(interpreter, r55_gas);
+
+                        let data_bytes = dram_slice(emu, ret_offset, ret_size)?;
 
                         return Ok(InterpreterAction::Return {
                             result: InterpreterResult {
@@ -220,21 +271,32 @@ fn execute_riscv(
                     }
                     Syscall::SLoad => {
                         let key: u64 = emu.cpu.xregs.read(10);
+                        debug!(
+                            "> SLOAD ({}) - Key: {}",
+                            interpreter.contract.target_address, key
+                        );
                         match host.sload(interpreter.contract.target_address, U256::from(key)) {
                             Some((value, is_cold)) => {
+                                debug!(
+                                    "> SLOAD ({}) - Value: {}",
+                                    interpreter.contract.target_address, value
+                                );
                                 let limbs = value.as_limbs();
                                 emu.cpu.xregs.write(10, limbs[0]);
                                 emu.cpu.xregs.write(11, limbs[1]);
                                 emu.cpu.xregs.write(12, limbs[2]);
                                 emu.cpu.xregs.write(13, limbs[3]);
-                                if is_cold {
-                                    evm_gas += 2100
-                                } else {
-                                    evm_gas += 100
-                                }
+                                syscall_gas!(
+                                    interpreter,
+                                    if is_cold {
+                                        gas::SLOAD_COLD
+                                    } else {
+                                        gas::SLOAD_WARM
+                                    }
+                                );
                             }
                             _ => {
-                                return return_revert(interpreter, evm_gas);
+                                return return_revert(interpreter, interpreter.gas.spent());
                             }
                         }
                     }
@@ -250,45 +312,89 @@ fn execute_riscv(
                             U256::from_limbs([first, second, third, fourth]),
                         );
                         if let Some(result) = result {
-                            if result.is_cold {
-                                evm_gas += 2200
-                            } else {
-                                evm_gas += 100
-                            }
+                            syscall_gas!(
+                                interpreter,
+                                if result.is_cold {
+                                    gas::SSTORE_COLD
+                                } else {
+                                    gas::SSTORE_WARM
+                                }
+                            );
                         }
                     }
                     Syscall::Call => {
                         let a0: u64 = emu.cpu.xregs.read(10);
-                        let address =
-                            Address::from_slice(emu.cpu.bus.get_dram_slice(a0..(a0 + 20))?);
-                        let value: u64 = emu.cpu.xregs.read(11);
-                        let args_offset: u64 = emu.cpu.xregs.read(12);
-                        let args_size: u64 = emu.cpu.xregs.read(13);
-                        let ret_offset = emu.cpu.xregs.read(14);
-                        let ret_size = emu.cpu.xregs.read(15);
+                        let a1: u64 = emu.cpu.xregs.read(11);
+                        let a2: u64 = emu.cpu.xregs.read(12);
+                        let addr = Address::from_word(U256::from_limbs([a0, a1, a2, 0]).into());
+                        let value: u64 = emu.cpu.xregs.read(13);
 
-                        *returned_data_destiny = Some(ret_offset..(ret_offset + ret_size));
+                        // Get calldata
+                        let args_offset: u64 = emu.cpu.xregs.read(14);
+                        let args_size: u64 = emu.cpu.xregs.read(15);
+                        let calldata: Bytes = emu
+                            .cpu
+                            .bus
+                            .get_dram_slice(args_offset..(args_offset + args_size))
+                            .unwrap_or(&mut [])
+                            .to_vec()
+                            .into();
 
-                        let tx = &host.env().tx;
+                        // Store where return data should go
+                        let ret_offset = emu.cpu.xregs.read(16);
+                        let ret_size = emu.cpu.xregs.read(17);
+                        debug!(
+                            "> Return data will be written to: {}..{}",
+                            ret_offset,
+                            ret_offset + ret_size
+                        );
+
+                        // Initialize memory region for return data
+                        let return_memory = emu
+                            .cpu
+                            .bus
+                            .get_dram_slice(ret_offset..(ret_offset + ret_size))?;
+                        return_memory.fill(0);
+                        rvemu.returned_data_destiny = Some(ret_offset..(ret_offset + ret_size));
+
+                        // Calculate gas cost of the call
+                        // TODO: check correctness (tried using evm.codes as ref but i'm no gas wizard)
+                        // TODO: unsure whether memory expansion cost is missing (should be captured in the risc-v costs)
+                        let (empty_account_cost, addr_access_cost) = match host.load_account(addr) {
+                            Some(account) => {
+                                if account.is_cold {
+                                    (0, gas::CALL_NEW_ACCOUNT)
+                                } else {
+                                    (0, gas::CALL_BASE)
+                                }
+                            }
+                            None => (gas::CALL_EMPTY_ACCOUNT, gas::CALL_NEW_ACCOUNT),
+                        };
+                        let value_cost = if value != 0 { gas::CALL_VALUE } else { 0 };
+                        let call_gas_cost = empty_account_cost + addr_access_cost + value_cost;
+                        syscall_gas!(interpreter, call_gas_cost);
+
+                        // proactively spend gas limit as the remaining will be refunded (otherwise it underflows)
+                        let call_gas_limit = interpreter.gas.remaining();
+                        syscall_gas!(interpreter, call_gas_limit);
+
+                        debug!("> Call context:");
+                        debug!("  - Caller: {}", interpreter.contract.target_address);
+                        debug!("  - Target Address: {}", addr);
+                        debug!("  - Value: {}", value);
+                        debug!("  - Calldata: {:?}", calldata);
                         return Ok(InterpreterAction::Call {
                             inputs: Box::new(CallInputs {
-                                input: emu
-                                    .cpu
-                                    .bus
-                                    .get_dram_slice(args_offset..(args_offset + args_size))?
-                                    .to_vec()
-                                    .into(),
-                                gas_limit: tx.gas_limit,
-                                target_address: address,
-                                bytecode_address: address,
+                                input: calldata,
+                                gas_limit: call_gas_limit,
+                                target_address: addr,
+                                bytecode_address: addr,
                                 caller: interpreter.contract.target_address,
-                                value: CallValue::Transfer(U256::from_le_bytes(
-                                    value.to_le_bytes(),
-                                )),
+                                value: CallValue::Transfer(U256::from(value)),
                                 scheme: CallScheme::Call,
                                 is_static: false,
                                 is_eof: false,
-                                return_memory_offset: 0..ret_size as usize,
+                                return_memory_offset: 0..0, // handled with `returned_data_destiny`
                             }),
                         });
                     }
@@ -442,9 +548,14 @@ fn execute_riscv(
                     }
                 }
             }
-            _ => {
-                let total_cost = r55_gas_used(&emu.cpu.inst_counter) + evm_gas;
-                return return_revert(interpreter, total_cost);
+            Ok(_) => {
+                trace!("Successful instruction at PC: {:#x}", emu.cpu.pc);
+                continue;
+            }
+            Err(e) => {
+                debug!("Execution error: {:#?}", e);
+                syscall_gas!(interpreter, r55_gas_used(&emu.cpu.inst_counter));
+                return return_revert(interpreter, interpreter.gas.spent());
             }
         }
     }
