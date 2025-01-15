@@ -1,4 +1,4 @@
-use alloy_primitives::Bytes;
+use alloy_primitives::{Bytes, U256};
 use alloy_sol_types::SolValue;
 use r55::{
     compile_deploy, compile_with_prefix,
@@ -25,11 +25,12 @@ fn erc20() {
     let addr1 = deploy_contract(&mut db, bytecode).unwrap();
     let addr2 = deploy_contract(&mut db, bytecode_x).unwrap();
 
+    let total_supply = get_selector_from_sig("total_supply");
     let selector_balance = get_selector_from_sig("balance_of");
     let selector_x_balance = get_selector_from_sig("x_balance_of");
     let selector_mint = get_selector_from_sig("mint");
     let alice: Address = address!("000000000000000000000000000000000000000A");
-    let value_mint: u64 = 42;
+    let value_mint = U256::from(42e18);
     let mut calldata_balance = alice.abi_encode();
     let mut calldata_mint = (alice, value_mint).abi_encode();
     let mut calldata_x_balance = (alice, addr1).abi_encode();
@@ -54,6 +55,17 @@ fn erc20() {
     );
     match run_tx(&mut db, &addr1, complete_calldata_mint.clone()) {
         Ok(res) => info!("{}", res),
+        Err(e) => {
+            error!("Error when executing tx! {:#?}", e);
+            panic!()
+        }
+    };
+    info!("----------------------------------------------------------");
+    info!("-- TOTAL SUPPLY ------------------------------------------");
+    info!("----------------------------------------------------------");
+    debug!("Tx Calldata:\n> {:#?}", Bytes::from(total_supply.to_vec()));
+    match run_tx(&mut db, &addr1, total_supply.to_vec()) {
+        Ok(res) => info!("Success! {}", res),
         Err(e) => {
             error!("Error when executing tx! {:#?}", e);
             panic!()
