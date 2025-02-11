@@ -1,4 +1,4 @@
-use alloy_core::primitives::Keccak256;
+use alloy_core::primitives::{Keccak256, U32};
 use core::{cell::RefCell, ops::Range};
 use eth_riscv_interpreter::setup_from_elf;
 use eth_riscv_syscalls::Syscall;
@@ -13,7 +13,7 @@ use revm::{
 };
 use rvemu::{emulator::Emulator, exception::Exception};
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use super::error::{Error, Result, TxResult};
 use super::gas;
@@ -21,13 +21,32 @@ use super::syscall_gas;
 
 const R5_REST_OF_RAM_INIT: u64 = 0x80300000; // Defined at `r5-rust-rt.x`
 
-pub fn deploy_contract(db: &mut InMemoryDB, bytecode: Bytes) -> Result<Address> {
+pub fn deploy_contract(
+    db: &mut InMemoryDB,
+    bytecode: Bytes,
+    encoded_args: Option<Vec<u8>>,
+) -> Result<Address> {
+    // Craft initcode: [0xFF][codesize][bytecode][constructor_args]
+    let codesize = U32::from(bytecode.len());
+    debug!("CODESIZE: {}", codesize);
+
+    let mut init_code = Vec::new();
+    init_code.push(0xff);
+    init_code.extend_from_slice(&Bytes::from(codesize.to_be_bytes_vec()));
+    init_code.extend_from_slice(&bytecode);
+    if let Some(args) = encoded_args {
+        debug!("ENCODED_ARGS: {:#?}", Bytes::from(args.clone()));
+        init_code.extend_from_slice(&args);
+    }
+    debug!("INITCODE SIZE: {}", init_code.len());
+
+    // Run CREATE tx
     let mut evm = Evm::builder()
         .with_db(db)
         .modify_tx_env(|tx| {
             tx.caller = address!("000000000000000000000000000000000000000A");
             tx.transact_to = TransactTo::Create;
-            tx.data = bytecode;
+            tx.data = Bytes::from(init_code);
             tx.value = U256::from(0);
         })
         .append_handler_register(handle_register)
@@ -39,9 +58,18 @@ pub fn deploy_contract(db: &mut InMemoryDB, bytecode: Bytes) -> Result<Address> 
     match result {
         ExecutionResult::Success {
             output: Output::Create(_value, Some(addr)),
+            logs,
             ..
         } => {
-            debug!("Deployed at addr: {:?}", addr);
+            info!(
+                "NEW DEPLOYMENT:\n> contract address: {:?}{}",
+                addr,
+                if logs.is_empty() {
+                    ""
+                } else {
+                    "\n> logs: {:#?}\n"
+                }
+            );
             Ok(addr)
         }
         result => Err(Error::UnexpectedExecResult(result)),
@@ -95,10 +123,27 @@ fn riscv_context(frame: &Frame) -> Option<RVEmu> {
     let interpreter = frame.interpreter();
 
     let Some((0xFF, bytecode)) = interpreter.bytecode.split_first() else {
+        warn!("NOT RISCV CONTRACT!");
         return None;
     };
 
-    match setup_from_elf(bytecode, &interpreter.contract.input) {
+    let (code, calldata) = if frame.is_create() {
+        let (code_size, init_code) = bytecode.split_at(4);
+        let Some((0xFF, bytecode)) = init_code.split_first() else {
+            warn!("NOT RISCV CONTRACT!");
+            return None;
+        };
+        let code_size = U32::from_be_slice(code_size).to::<usize>() - 1; // deduct control byte `0xFF`
+        let end_of_args = init_code.len() - 34; // deduct control byte + ignore empty (32 byte) word appended by revm
+
+        (&bytecode[..code_size], &bytecode[code_size..end_of_args])
+    } else if frame.is_call() {
+        (bytecode, interpreter.contract.input.as_ref())
+    } else {
+        todo!("Support EOF")
+    };
+
+    match setup_from_elf(code, calldata) {
         Ok(emu) => Some(RVEmu {
             emu,
             returned_data_destiny: None,
@@ -119,6 +164,7 @@ pub fn handle_register<EXT, DB: Database>(handler: &mut EvmHandler<'_, EXT, DB>)
     handler.execution.call = Arc::new(move |ctx, inputs| {
         let result = old_handle(ctx, inputs);
         if let Ok(FrameOrResult::Frame(frame)) = &result {
+            trace!("Creating new CALL frame");
             call_stack_inner.borrow_mut().push(riscv_context(frame));
         }
         result
@@ -130,6 +176,7 @@ pub fn handle_register<EXT, DB: Database>(handler: &mut EvmHandler<'_, EXT, DB>)
     handler.execution.create = Arc::new(move |ctx, inputs| {
         let result = old_handle(ctx, inputs);
         if let Ok(FrameOrResult::Frame(frame)) = &result {
+            trace!("Creating new CREATE frame");
             call_stack_inner.borrow_mut().push(riscv_context(frame));
         }
         result
@@ -276,23 +323,23 @@ fn execute_riscv(
                         let key4: u64 = emu.cpu.xregs.read(13);
                         let key = U256::from_limbs([key1, key2, key3, key4]);
                         debug!(
-                            "> SLOAD ({}) - Key: {}",
+                            "> SLOAD ({}) - Key: {:#02x}",
                             interpreter.contract.target_address, key
                         );
                         match host.sload(interpreter.contract.target_address, key) {
-                            Some((value, is_cold)) => {
+                            Some(state_load) => {
                                 debug!(
                                     "> SLOAD ({}) - Value: {}",
-                                    interpreter.contract.target_address, value
+                                    interpreter.contract.target_address, state_load.data
                                 );
-                                let limbs = value.as_limbs();
+                                let limbs = state_load.data.as_limbs();
                                 emu.cpu.xregs.write(10, limbs[0]);
                                 emu.cpu.xregs.write(11, limbs[1]);
                                 emu.cpu.xregs.write(12, limbs[2]);
                                 emu.cpu.xregs.write(13, limbs[3]);
                                 syscall_gas!(
                                     interpreter,
-                                    if is_cold {
+                                    if state_load.is_cold {
                                         gas::SLOAD_COLD
                                     } else {
                                         gas::SLOAD_WARM
@@ -375,16 +422,17 @@ fn execute_riscv(
                         // Calculate gas cost of the call
                         // TODO: check correctness (tried using evm.codes as ref but i'm no gas wizard)
                         // TODO: unsure whether memory expansion cost is missing (should be captured in the risc-v costs)
-                        let (empty_account_cost, addr_access_cost) = match host.load_account(addr) {
-                            Some(account) => {
-                                if account.is_cold {
-                                    (0, gas::CALL_NEW_ACCOUNT)
-                                } else {
-                                    (0, gas::CALL_BASE)
+                        let (empty_account_cost, addr_access_cost) =
+                            match host.load_account_delegated(addr) {
+                                Some(account) => {
+                                    if account.is_cold {
+                                        (0, gas::CALL_NEW_ACCOUNT)
+                                    } else {
+                                        (0, gas::CALL_BASE)
+                                    }
                                 }
-                            }
-                            None => (gas::CALL_EMPTY_ACCOUNT, gas::CALL_NEW_ACCOUNT),
-                        };
+                                None => (gas::CALL_EMPTY_ACCOUNT, gas::CALL_NEW_ACCOUNT),
+                            };
                         let value_cost = if value != 0 { gas::CALL_VALUE } else { 0 };
                         let call_gas_cost = empty_account_cost + addr_access_cost + value_cost;
                         syscall_gas!(interpreter, call_gas_cost);
