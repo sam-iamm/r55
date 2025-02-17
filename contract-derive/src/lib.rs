@@ -1,14 +1,15 @@
 extern crate proc_macro;
-use alloy_core::primitives::{keccak256, U256};
+use alloy_core::primitives::U256;
 use alloy_sol_types::SolValue;
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, spanned::Spanned, Data, DeriveInput, Fields, ImplItem, ImplItemMethod, ItemImpl, ItemTrait, LitStr, Meta, NestedMeta, ReturnType, TraitItem
+    parse_macro_input, Data, DeriveInput, Fields, ImplItem, ImplItemMethod,
+    ItemImpl, ItemTrait, ReturnType, TraitItem,
 };
 
 mod helpers;
-use crate::helpers::{MethodInfo, InterfaceCompilationTarget, InterfaceArgs};
+use crate::helpers::{InterfaceArgs, MethodInfo};
 
 #[proc_macro_derive(Event, attributes(indexed))]
 pub fn event_derive(input: TokenStream) -> TokenStream {
@@ -124,21 +125,16 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
         .collect();
     let match_arms: Vec<_> = public_methods.iter().map(|method| {
         let method_name = &method.sig.ident;
-        let method_selector = u32::from_be_bytes(
-            keccak256(
-                method_name.to_string()
-            )[..4].try_into().unwrap_or_default()
-        );
         let method_info = MethodInfo::from(*method);
+        let method_selector = u32::from_be_bytes(
+            helpers::generate_fn_selector(&method_info, None)
+                .expect("Unable to generate fn selector")
+        );
         let (arg_names, arg_types) = helpers::get_arg_props_skip_first(&method_info);
 
         // Check if there are payable methods
         let checks = if !is_payable(&method) {
-            quote! {
-                if eth_riscv_runtime::msg_value() > U256::from(0) {
-                    revert();
-                }
-            }
+            quote! { if eth_riscv_runtime::msg_value() > U256::from(0) { revert(); } }
         } else {
             quote! {}
         };
@@ -147,9 +143,7 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
         let return_handling = match &method.sig.output {
             ReturnType::Default => {
                 // No return value
-                quote! {
-                    self.#method_name(#( #arg_names ),*);
-                }
+                quote! { self.#method_name(#( #arg_names ),*); }
             }
             ReturnType::Type(_, return_type) => {
                 // Has return value
@@ -225,7 +219,11 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Generate the interface
     let interface_name = format_ident!("I{}", struct_name);
-    let interface = helpers::generate_interface(&public_methods, &interface_name, None, InterfaceCompilationTarget::R55);
+    let interface = helpers::generate_interface(
+        &public_methods,
+        &interface_name,
+        None,
+    );
 
     // Generate initcode for deployments
     let deployment_code = helpers::generate_deployment_code(struct_name, constructor);
@@ -343,11 +341,8 @@ pub fn interface(attr: TokenStream, item: TokenStream) -> TokenStream {
         .collect();
 
     // Generate intreface implementation
-    let interface = helpers::generate_interface(&methods, trait_name, args.rename, args.target);
-
-    let output = quote! {
-        #interface
-    };
+    let interface = helpers::generate_interface(&methods, trait_name, args.rename);
+    let output = quote! { #interface };
 
     TokenStream::from(output)
 }

@@ -49,8 +49,8 @@ fn evm_call() {
     let selector_get = get_selector_from_sig("get()");
     let selector_set = get_selector_from_sig("set(uint256)");
     let selector_raw_call = get_selector_from_sig("rawCall((address,bytes))");
-    let selector_x_get = get_selector_from_sig("x_get");
-    let selector_x_set = get_selector_from_sig("x_set");
+    let selector_x_get = get_selector_from_sig("x_get(address)");
+    let selector_x_set = get_selector_from_sig("x_set(address,uint256)");
 
     let alice: Address = address!("000000000000000000000000000000000000000A");
     add_balance_to_db(&mut db, alice, 1e18 as u64);
@@ -78,7 +78,7 @@ fn evm_call() {
     info!("----------------------------------------------------------");
     info!("-- X-GET VALUE TX (R55 CONTRACT -> EVM CONTRACT) ----------");
     info!("----------------------------------------------------------");
-    // call traces: r55.x_get() > evm.get()
+    // call traces: r55.x_get() -> evm.get()
     let mut calldata_x_get = evm.abi_encode();
     let mut complete_calldata_x_get = selector_x_get.to_vec();
     complete_calldata_x_get.append(&mut calldata_x_get);
@@ -104,7 +104,7 @@ fn evm_call() {
     info!("----------------------------------------------------------");
     info!("-- X-SET VALUE TX (R55 CONTRACT -> EVM CONTRACT) ----------");
     info!("----------------------------------------------------------");
-    // call traces: r55.x_set() > evm.set()
+    // call traces: r55.x_set() -> evm.set()
     let value_x_set = U256::from(3e18);
     let mut calldata_x_set = (evm, value_x_set).abi_encode();
     let mut complete_calldata_x_set = selector_x_set.to_vec();
@@ -143,7 +143,7 @@ fn evm_call() {
     info!("----------------------------------------------------------");
     info!("-- RAW-CALL TX (EVM -> R55 -> EVM ) ----------------------");
     info!("----------------------------------------------------------");
-    // call traces: evm.rawCall() > r55.x_set() > evm.set()
+    // call traces: evm.rawCall() -> r55.x_set() -> evm.set()
     let value_raw_call_x_set = U256::from(5e18);
     let mut calldata_x_set = (evm, value_raw_call_x_set).abi_encode();
     let mut complete_calldata_x_set = selector_x_set.to_vec();
