@@ -82,11 +82,16 @@ pub fn deploy_contract(
     }
 }
 
-pub fn run_tx(db: &mut InMemoryDB, addr: &Address, calldata: Vec<u8>) -> Result<TxResult> {
+pub fn run_tx(
+    db: &mut InMemoryDB,
+    addr: &Address,
+    calldata: Vec<u8>,
+    caller: &Address,
+) -> Result<TxResult> {
     let mut evm = Evm::builder()
         .with_db(db)
         .modify_tx_env(|tx| {
-            tx.caller = address!("000000000000000000000000000000000000000A");
+            tx.caller = *caller;
             tx.transact_to = TransactTo::Call(*addr);
             tx.data = calldata.into();
             tx.value = U256::from(0);
@@ -355,8 +360,8 @@ fn execute_riscv(
                         let dest_offset = emu.cpu.xregs.read(10);
                         let offset = emu.cpu.xregs.read(11) as usize;
                         let size = emu.cpu.xregs.read(12) as usize;
-                        let data = &interpreter.return_data_buffer.as_ref()[offset..size];
-                        trace!(
+                        let data = &interpreter.return_data_buffer.as_ref()[offset..offset + size];
+                        debug!(
                             "> RETURNDATACOPY [memory_offset: {}, offset: {}, size: {}]\n{}",
                             dest_offset,
                             offset,
@@ -374,10 +379,15 @@ fn execute_riscv(
                     Syscall::Call => return execute_call(emu, interpreter, host, false),
                     Syscall::StaticCall => return execute_call(emu, interpreter, host, true),
                     Syscall::Revert => {
+                        let ret_offset: u64 = emu.cpu.xregs.read(10);
+                        let ret_size: u64 = emu.cpu.xregs.read(11);
+                        let data_bytes: Vec<u8> = dram_slice(emu, ret_offset, ret_size)?.into();
+                        debug!("REVERT > offset: {:#04x}, size: {}", ret_offset, ret_size);
+
                         return Ok(InterpreterAction::Return {
                             result: InterpreterResult {
                                 result: InstructionResult::Revert,
-                                output: Bytes::from(0u32.to_be_bytes()), //TODO: return revert(0,0)
+                                output: Bytes::from(data_bytes),
                                 gas: interpreter.gas, // FIXME: gas is not correct
                             },
                         });

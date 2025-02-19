@@ -3,15 +3,17 @@
 #![feature(alloc_error_handler, maybe_uninit_write_slice, round_char_boundary)]
 
 use alloy_core::primitives::{Address, U256};
-use core::arch::asm;
-use core::panic::PanicInfo;
-use core::slice;
+use core::{arch::asm, fmt::Write, panic::PanicInfo, slice};
 pub use riscv_rt::entry;
+extern crate alloc as ext_alloc;
 
 mod alloc;
 pub mod block;
-pub mod types;
 pub mod tx;
+pub mod types;
+
+pub mod error;
+pub use error::{revert, revert_with_error, Error};
 
 pub mod log;
 pub use log::{emit_log, Event};
@@ -26,19 +28,21 @@ pub unsafe fn slice_from_raw_parts(address: usize, length: usize) -> &'static [u
 }
 
 #[panic_handler]
-unsafe fn panic(_panic: &PanicInfo<'_>) -> ! {
+unsafe fn panic(info: &PanicInfo<'_>) -> ! {
     static mut IS_PANICKING: bool = false;
 
     if !IS_PANICKING {
         IS_PANICKING = true;
 
-        revert();
-        // TODO with string
-        //print!("{panic}\n");
+        // Capture the panic info msg
+        let mut message = ext_alloc::string::String::new();
+        let _ = write!(message, "{:?}", info.message());
+
+        // Convert to bytes and revert
+        let msg = message.into_bytes();
+        revert_with_error(&msg);
     } else {
-        revert();
-        // TODO with string
-        //print_str("Panic handler has panicked! Things are very dire indeed...\n");
+        revert_with_error("Panic handler has panicked!".as_bytes())
     }
 }
 
@@ -76,13 +80,6 @@ pub fn sstore(key: U256, value: U256) {
             in("t0") u8::from(Syscall::SStore)
         );
     }
-}
-
-pub fn revert() -> ! {
-    unsafe {
-        asm!("ecall", in("t0") u8::from(Syscall::Revert));
-    }
-    unreachable!()
 }
 
 pub fn keccak256(offset: u64, size: u64) -> U256 {
@@ -135,27 +132,14 @@ pub fn msg_data() -> &'static [u8] {
     unsafe { slice_from_raw_parts(CALLDATA_ADDRESS + 8, length) }
 }
 
-pub fn log(data_ptr: u64, data_size: u64, topics_ptr: u64, topics_size: u64) {
-    unsafe {
-        asm!(
-            "ecall",
-            in("a0") data_ptr,
-            in("a1") data_size,
-            in("a2") topics_ptr,
-            in("a3") topics_size,
-            in("t0") u8::from(Syscall::Log)
-        );
-    }
-}
-
 #[allow(non_snake_case)]
 #[no_mangle]
 fn DefaultHandler() {
-    revert();
+    panic!("default handler");
 }
 
 #[allow(non_snake_case)]
 #[no_mangle]
 fn ExceptionHandler(_trap_frame: &riscv_rt::TrapFrame) -> ! {
-    revert();
+    panic!("exception nhandler");
 }

@@ -5,7 +5,8 @@ use alloy_dyn_abi::DynSolType;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    parse::{Parse, ParseStream}, FnArg, Ident, ImplItemMethod, LitStr, ReturnType, TraitItemMethod, Type
+    parse::{Parse, ParseStream},
+    FnArg, Ident, ImplItemMethod, LitStr, PathArguments, ReturnType, TraitItemMethod, Type,
 };
 
 // Unified method info from `ImplItemMethod` and `TraitItemMethod`
@@ -50,7 +51,7 @@ impl<'a> MethodInfo<'a> {
 fn get_arg_props<'a>(
     skip_first_arg: bool,
     method: &'a MethodInfo<'a>,
-) -> (Vec<Ident>, Vec<&syn::Type>) {
+) -> (Vec<Ident>, Vec<&'a syn::Type>) {
     method
         .args
         .iter()
@@ -66,11 +67,13 @@ fn get_arg_props<'a>(
         .unzip()
 }
 
-pub fn get_arg_props_skip_first<'a>(method: &'a MethodInfo<'a>) -> (Vec<Ident>, Vec<&syn::Type>) {
+pub fn get_arg_props_skip_first<'a>(
+    method: &'a MethodInfo<'a>,
+) -> (Vec<Ident>, Vec<&'a syn::Type>) {
     get_arg_props(true, method)
 }
 
-pub fn get_arg_props_all<'a>(method: &'a MethodInfo<'a>) -> (Vec<Ident>, Vec<&syn::Type>) {
+pub fn get_arg_props_all<'a>(method: &'a MethodInfo<'a>) -> (Vec<Ident>, Vec<&'a syn::Type>) {
     get_arg_props(false, method)
 }
 
@@ -94,16 +97,23 @@ impl Parse for InterfaceArgs {
 
             match value.as_str() {
                 "camelCase" => Some(InterfaceNamingStyle::CamelCase),
-                invalid => return Err(syn::Error::new(
-                    input.span(),
-                    format!("unsupported style: {}. Only 'camelCase' is supported", invalid)
-                ))
+                invalid => {
+                    return Err(syn::Error::new(
+                        input.span(),
+                        format!(
+                            "unsupported style: {}. Only 'camelCase' is supported",
+                            invalid
+                        ),
+                    ))
+                }
             }
         } else {
             None
         };
 
-        Ok(InterfaceArgs { rename: rename_style })
+        Ok(InterfaceArgs {
+            rename: rename_style,
+        })
     }
 }
 
@@ -183,7 +193,7 @@ fn generate_method_impl(
     let name = method.name;
     let return_type = method.return_type;
     let method_selector = u32::from_be_bytes(
-        generate_fn_selector(method, interface_style).expect("Unable to generate fn selector")
+        generate_fn_selector(method, interface_style).expect("Unable to generate fn selector"),
     );
 
     let (arg_names, arg_types) = get_arg_props_skip_first(method);
@@ -224,27 +234,146 @@ fn generate_method_impl(
         )
     };
 
-    let return_ty = match return_type {
-        ReturnType::Default => quote! { () },
-        ReturnType::Type(_, ty) => quote! { #ty },
+    // Generate different implementations based on return type
+    match extract_wrapper_types(&method.return_type) {
+        // If `Result<T, E>` handle each individual type
+        WrapperType::Result(ok_type, err_type) => quote! {
+            pub fn #name(#self_param, #(#arg_names: #arg_types),*) -> Result<#ok_type, #err_type>  {
+                use alloy_sol_types::SolValue;
+                use alloc::vec::Vec;
+
+                #calldata
+
+                let result = #call_fn(
+                    self.address,
+                    0_u64,
+                    &complete_calldata,
+                    None
+                );
+
+                match <#ok_type>::abi_decode(&result, true) {
+                    Ok(decoded) => Ok(decoded),
+                    Err(_) => Err(<#err_type>::abi_decode(&result, true))
+                }
+            }
+        },
+        // If `Option<T>` unwrap the type to decode, and wrap it back
+        WrapperType::Option(return_ty) => {
+            quote! {
+                pub fn #name(#self_param, #(#arg_names: #arg_types),*) -> Option<#return_ty> {
+                    use alloy_sol_types::SolValue;
+                    use alloc::vec::Vec;
+
+                    #calldata
+
+                    let result = #call_fn(
+                        self.address,
+                        0_u64,
+                        &complete_calldata,
+                        None
+                    );
+
+                    match <#return_ty>::abi_decode(&result, true) {
+                        Ok(decoded) => Some(decoded),
+                        Err(_) => None
+                    }
+                }
+            }
+        }
+        // Otherwise, simply decode the value + wrap it in an `Option` to force error-handling
+        WrapperType::None => {
+            let return_ty = match return_type {
+                ReturnType::Default => quote! { () },
+                ReturnType::Type(_, ty) => quote! { #ty },
+            };
+            quote! {
+                pub fn #name(#self_param, #(#arg_names: #arg_types),*) -> Option<#return_ty> {
+                    use alloy_sol_types::SolValue;
+                    use alloc::vec::Vec;
+
+                    #calldata
+
+                    let result = #call_fn(
+                        self.address,
+                        0_u64,
+                        &complete_calldata,
+                        None
+                    );
+
+                    match <#return_ty>::abi_decode(&result, true) {
+                        Ok(decoded) => Some(decoded),
+                        Err(_) => None
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub enum WrapperType {
+    Result(TokenStream, TokenStream),
+    Option(TokenStream),
+    None,
+}
+
+// Helper function to extract Result or Option types if present
+pub fn extract_wrapper_types(return_type: &ReturnType) -> WrapperType {
+    let type_path = match return_type {
+        ReturnType::Default => return WrapperType::None,
+        ReturnType::Type(_, ty) => match ty.as_ref() {
+            Type::Path(type_path) => type_path,
+            _ => return WrapperType::None,
+        },
     };
 
-    quote! {
-        pub fn #name(#self_param, #(#arg_names: #arg_types),*) -> Option<#return_ty> {
-            use alloy_sol_types::SolValue;
-            use alloc::vec::Vec;
+    let last_segment = match type_path.path.segments.last() {
+        Some(segment) => segment,
+        None => return WrapperType::None,
+    };
 
-            #calldata
+    match last_segment.ident.to_string().as_str() {
+        "Result" => {
+            let PathArguments::AngleBracketed(args) = &last_segment.arguments else {
+                return WrapperType::None;
+            };
 
-            let result = #call_fn(
-                self.address,
-                0_u64,
-                &complete_calldata,
-                None
-            )?;
+            let type_args: Vec<_> = args.args.iter().collect();
+            if type_args.len() != 2 {
+                return WrapperType::None;
+            }
 
-            <#return_ty>::abi_decode(&result, true).ok()
+            // Convert the generic arguments to TokenStreams directly
+            let ok_type = match &type_args[0] {
+                syn::GenericArgument::Type(t) => quote!(#t),
+                _ => return WrapperType::None,
+            };
+
+            let err_type = match &type_args[1] {
+                syn::GenericArgument::Type(t) => quote!(#t),
+                _ => return WrapperType::None,
+            };
+
+            WrapperType::Result(ok_type, err_type)
         }
+        "Option" => {
+            let PathArguments::AngleBracketed(args) = &last_segment.arguments else {
+                return WrapperType::None;
+            };
+
+            let type_args: Vec<_> = args.args.iter().collect();
+            if type_args.len() != 1 {
+                return WrapperType::None;
+            }
+
+            // Convert the generic argument to TokenStream
+            let inner_type = match &type_args[0] {
+                syn::GenericArgument::Type(t) => quote!(#t),
+                _ => return WrapperType::None,
+            };
+
+            WrapperType::Option(inner_type)
+        }
+        _ => WrapperType::None,
     }
 }
 
@@ -279,7 +408,7 @@ pub fn generate_fn_selector(
 
 // Helper function to convert rust types to their solidity equivalent
 // TODO: make sure that the impl is robust, so far only tested with "simple types"
-fn rust_type_to_sol_type(ty: &Type) -> Result<DynSolType, &'static str> {
+pub fn rust_type_to_sol_type(ty: &Type) -> Result<DynSolType, &'static str> {
     match ty {
         Type::Path(type_path) => {
             let path = &type_path.path;
@@ -382,7 +511,7 @@ fn rust_type_to_sol_type(ty: &Type) -> Result<DynSolType, &'static str> {
 fn to_camel_case(s: String) -> String {
     let mut result = String::new();
     let mut capitalize_next = false;
-    
+
     // Iterate through characters, skipping non-alphabetic separators
     for (i, c) in s.chars().enumerate() {
         if c.is_alphanumeric() {
@@ -447,6 +576,342 @@ pub fn generate_deployment_code(
             let result_ptr = prepended_runtime_slice.as_ptr() as u64;
             let result_len = prepended_runtime_slice.len() as u64;
             eth_riscv_runtime::return_riscv(result_ptr, result_len);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syn::parse_quote;
+
+    struct MockMethod {
+        method: ImplItemMethod,
+    }
+
+    impl MockMethod {
+        fn new(name: &str, args: Vec<&str>) -> Self {
+            let name_ident = syn::Ident::new(name, proc_macro2::Span::call_site());
+            let args_tokens = if args.is_empty() {
+                quote!()
+            } else {
+                let args = args.iter().map(|arg| {
+                    let parts: Vec<&str> = arg.split(": ").collect();
+                    let arg_name = syn::Ident::new(parts[0], proc_macro2::Span::call_site());
+                    let type_str = parts[1];
+                    let type_tokens: proc_macro2::TokenStream = type_str.parse().unwrap();
+                    quote!(#arg_name: #type_tokens)
+                });
+                quote!(, #(#args),*)
+            };
+
+            let method: ImplItemMethod = parse_quote! {
+                fn #name_ident(&self #args_tokens) {}
+            };
+            Self { method }
+        }
+
+        fn info(&self) -> MethodInfo {
+            MethodInfo::from(self)
+        }
+    }
+
+    impl<'a> From<&'a MockMethod> for MethodInfo<'a> {
+        fn from(test_method: &'a MockMethod) -> Self {
+            MethodInfo::from(&test_method.method)
+        }
+    }
+
+    pub fn get_selector_from_sig(sig: &str) -> [u8; 4] {
+        keccak256(sig.as_bytes())[0..4]
+            .try_into()
+            .expect("Selector should have exactly 4 bytes")
+    }
+
+    #[test]
+    fn test_rust_to_sol_basic_types() {
+        let test_cases = vec![
+            (parse_quote!(Address), DynSolType::Address),
+            (parse_quote!(Function), DynSolType::Function),
+            (parse_quote!(bool), DynSolType::Bool),
+            (parse_quote!(Bool), DynSolType::Bool),
+            (parse_quote!(String), DynSolType::String),
+            (parse_quote!(str), DynSolType::String),
+            (parse_quote!(Bytes), DynSolType::Bytes),
+        ];
+
+        for (rust_type, expected_sol_type) in test_cases {
+            assert_eq!(
+                rust_type_to_sol_type(&rust_type).unwrap(),
+                expected_sol_type
+            );
+        }
+    }
+
+    #[test]
+    fn test_rust_to_sol_fixed_bytes() {
+        let test_cases = vec![
+            (parse_quote!(B1), DynSolType::FixedBytes(1)),
+            (parse_quote!(B16), DynSolType::FixedBytes(16)),
+            (parse_quote!(B32), DynSolType::FixedBytes(32)),
+        ];
+
+        for (rust_type, expected_sol_type) in test_cases {
+            assert_eq!(
+                rust_type_to_sol_type(&rust_type).unwrap(),
+                expected_sol_type
+            );
+        }
+
+        // Invalid cases
+        assert!(rust_type_to_sol_type(&parse_quote!(B0)).is_err());
+        assert!(rust_type_to_sol_type(&parse_quote!(B33)).is_err());
+    }
+
+    #[test]
+    fn test_rust_to_sol_integers() {
+        let test_cases = vec![
+            (parse_quote!(U8), DynSolType::Uint(8)),
+            (parse_quote!(U256), DynSolType::Uint(256)),
+            (parse_quote!(I8), DynSolType::Int(8)),
+            (parse_quote!(I256), DynSolType::Int(256)),
+        ];
+
+        for (rust_type, expected_sol_type) in test_cases {
+            assert_eq!(
+                rust_type_to_sol_type(&rust_type).unwrap(),
+                expected_sol_type
+            );
+        }
+
+        // Invalid cases
+        assert!(rust_type_to_sol_type(&parse_quote!(U0)).is_err());
+        assert!(rust_type_to_sol_type(&parse_quote!(U257)).is_err());
+        assert!(rust_type_to_sol_type(&parse_quote!(U7)).is_err()); // Not multiple of 8
+        assert!(rust_type_to_sol_type(&parse_quote!(I0)).is_err());
+        assert!(rust_type_to_sol_type(&parse_quote!(I257)).is_err());
+        assert!(rust_type_to_sol_type(&parse_quote!(I7)).is_err()); // Not multiple of 8
+    }
+
+    #[test]
+    fn test_rust_to_sol_arrays() {
+        // Dynamic arrays (Vec)
+        assert_eq!(
+            rust_type_to_sol_type(&parse_quote!(Vec<U256>)).unwrap(),
+            DynSolType::Array(Box::new(DynSolType::Uint(256)))
+        );
+
+        assert_eq!(
+            rust_type_to_sol_type(&parse_quote!(Vec<Bool>)).unwrap(),
+            DynSolType::Array(Box::new(DynSolType::Bool))
+        );
+
+        // Fixed-size arrays
+        assert_eq!(
+            rust_type_to_sol_type(&parse_quote!([U256; 5])).unwrap(),
+            DynSolType::FixedArray(Box::new(DynSolType::Uint(256)), 5)
+        );
+
+        assert_eq!(
+            rust_type_to_sol_type(&parse_quote!([Bool; 3])).unwrap(),
+            DynSolType::FixedArray(Box::new(DynSolType::Bool), 3)
+        );
+    }
+
+    #[test]
+    fn test_rust_to_sol_tuples() {
+        assert_eq!(
+            rust_type_to_sol_type(&parse_quote!((U256, Bool))).unwrap(),
+            DynSolType::Tuple(vec![DynSolType::Uint(256), DynSolType::Bool])
+        );
+
+        assert_eq!(
+            rust_type_to_sol_type(&parse_quote!((Address, B32, I128))).unwrap(),
+            DynSolType::Tuple(vec![
+                DynSolType::Address,
+                DynSolType::FixedBytes(32),
+                DynSolType::Int(128)
+            ])
+        );
+    }
+
+    #[test]
+    fn test_rust_to_sol_nested_types() {
+        // Nested Vec
+        assert_eq!(
+            rust_type_to_sol_type(&parse_quote!(Vec<Vec<U256>>)).unwrap(),
+            DynSolType::Array(Box::new(DynSolType::Array(Box::new(DynSolType::Uint(256)))))
+        );
+
+        // Nested fixed array
+        assert_eq!(
+            rust_type_to_sol_type(&parse_quote!([[U256; 2]; 3])).unwrap(),
+            DynSolType::FixedArray(
+                Box::new(DynSolType::FixedArray(Box::new(DynSolType::Uint(256)), 2)),
+                3
+            )
+        );
+
+        // Nested tuple
+        assert_eq!(
+            rust_type_to_sol_type(&parse_quote!((U256, (Bool, Address)))).unwrap(),
+            DynSolType::Tuple(vec![
+                DynSolType::Uint(256),
+                DynSolType::Tuple(vec![DynSolType::Bool, DynSolType::Address])
+            ])
+        );
+    }
+
+    #[test]
+    fn test_rust_to_sol_invalid_types() {
+        // Invalid type names
+        assert!(rust_type_to_sol_type(&parse_quote!(InvalidType)).is_err());
+
+        // Invalid generic types
+        assert!(rust_type_to_sol_type(&parse_quote!(Option<U256>)).is_err());
+        assert!(rust_type_to_sol_type(&parse_quote!(Result<U256>)).is_err());
+    }
+
+    #[test]
+    fn test_fn_selector() {
+        // No arguments
+        let method = MockMethod::new("balance", vec![]);
+        assert_eq!(
+            generate_fn_selector(&method.info(), None).unwrap(),
+            get_selector_from_sig("balance()"),
+        );
+
+        // Single argument
+        let method = MockMethod::new("transfer", vec!["to: Address"]);
+        assert_eq!(
+            generate_fn_selector(&method.info(), None).unwrap(),
+            get_selector_from_sig("transfer(address)"),
+        );
+
+        // Multiple arguments
+        let method = MockMethod::new(
+            "transfer_from",
+            vec!["from: Address", "to: Address", "amount: U256"],
+        );
+        assert_eq!(
+            generate_fn_selector(&method.info(), None).unwrap(),
+            get_selector_from_sig("transfer_from(address,address,uint256)")
+        );
+
+        // Dynamic arrays
+        let method = MockMethod::new("batch_transfer", vec!["recipients: Vec<Address>"]);
+        assert_eq!(
+            generate_fn_selector(&method.info(), None).unwrap(),
+            get_selector_from_sig("batch_transfer(address[])")
+        );
+
+        // Tuples
+        let method = MockMethod::new(
+            "complex_transfer",
+            vec!["data: (Address, U256)", "check: (Vec<Address>, Vec<Bool>)"],
+        );
+        assert_eq!(
+            generate_fn_selector(&method.info(), None).unwrap(),
+            get_selector_from_sig("complex_transfer((address,uint256),(address[],bool[]))")
+        );
+
+        // Fixed arrays
+        let method = MockMethod::new("multi_transfer", vec!["amounts: [U256; 3]"]);
+        assert_eq!(
+            generate_fn_selector(&method.info(), None).unwrap(),
+            get_selector_from_sig("multi_transfer(uint256[3])")
+        );
+    }
+
+    #[test]
+    fn test_fn_selector_rename_camel_case() {
+        let method = MockMethod::new("get_balance", vec![]);
+        assert_eq!(
+            generate_fn_selector(&method.info(), Some(InterfaceNamingStyle::CamelCase)).unwrap(),
+            get_selector_from_sig("getBalance()")
+        );
+
+        let method = MockMethod::new("transfer_from_account", vec!["to: Address"]);
+        assert_eq!(
+            generate_fn_selector(&method.info(), Some(InterfaceNamingStyle::CamelCase)).unwrap(),
+            get_selector_from_sig("transferFromAccount(address)")
+        );
+    }
+
+    #[test]
+    fn test_fn_selector_erc20() {
+        let cases = vec![
+            ("totalSupply", vec![], "totalSupply()"),
+            ("balanceOf", vec!["account: Address"], "balanceOf(address)"),
+            (
+                "transfer",
+                vec!["recipient: Address", "amount: U256"],
+                "transfer(address,uint256)",
+            ),
+            (
+                "allowance",
+                vec!["owner: Address", "spender: Address"],
+                "allowance(address,address)",
+            ),
+            (
+                "approve",
+                vec!["spender: Address", "amount: U256"],
+                "approve(address,uint256)",
+            ),
+            (
+                "transferFrom",
+                vec!["sender: Address", "recipient: Address", "amount: U256"],
+                "transferFrom(address,address,uint256)",
+            ),
+        ];
+
+        for (name, args, signature) in cases {
+            let method = MockMethod::new(name, args);
+            assert_eq!(
+                generate_fn_selector(&method.info(), None).unwrap(),
+                get_selector_from_sig(signature),
+                "Selector mismatch for {}",
+                signature
+            );
+        }
+    }
+
+    #[test]
+    fn test_fn_selector_erc721() {
+        let cases = vec![
+            (
+                "safeTransferFrom",
+                vec![
+                    "from: Address",
+                    "to: Address",
+                    "tokenId: U256",
+                    "data: Bytes",
+                ],
+                "safeTransferFrom(address,address,uint256,bytes)",
+            ),
+            ("name", vec![], "name()"),
+            ("symbol", vec![], "symbol()"),
+            ("tokenURI", vec!["tokenId: U256"], "tokenURI(uint256)"),
+            (
+                "approve",
+                vec!["to: Address", "tokenId: U256"],
+                "approve(address,uint256)",
+            ),
+            (
+                "setApprovalForAll",
+                vec!["operator: Address", "approved: bool"],
+                "setApprovalForAll(address,bool)",
+            ),
+        ];
+
+        for (name, args, signature) in cases {
+            let method = MockMethod::new(name, args);
+            assert_eq!(
+                generate_fn_selector(&method.info(), None).unwrap(),
+                get_selector_from_sig(signature),
+                "Selector mismatch for {}",
+                signature
+            );
         }
     }
 }
