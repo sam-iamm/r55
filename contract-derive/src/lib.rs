@@ -454,6 +454,8 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
         // only when not in `interface-only` mode
         #[cfg(not(any(feature = "deploy", feature = "interface-only")))]
         #[allow(non_local_definitions)]
+        #[allow(unused_imports)]
+        #[allow(unreachable_code)]
         mod implementation {
             use super::*;
             use alloy_sol_types::SolValue;
