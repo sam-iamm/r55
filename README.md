@@ -105,7 +105,7 @@ brew install riscv-gnu-toolchain gettext
 
 The [R55](https://github.com/r55-eth/r55/tree/main/r55) crate has an [e2e test](https://github.com/r55-eth/r55/tree/main/r55/tests/e2e.rs)
 that puts everything together in an end-to-end PoC, compiling the
-[erc20](https://github.com/r55-eth/r55/tree/main/erc20) contract, deploying
+[erc20](https://github.com/r55-eth/r55/tree/main/examples/erc20) contract, deploying
 it to an internal instance of [revm-r55](https://github.com/r0qs/revm), and
 running two transactions on it, first a `mint` then a `balance_of` check.
 
