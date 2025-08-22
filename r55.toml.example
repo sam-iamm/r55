@@ -1,0 +1,52 @@
+# R55 Configuration File
+# This file configures the R55 compiler behavior, similar to Foundry's foundry.toml
+
+# Source directories where contracts are located
+# Default: ["src", "contracts"]
+src = ["src", "contracts", "examples"]
+
+# Output directory for compiled bytecode
+# Default: "out"
+out = "r55-output-bytecode"
+
+# Library/dependency directories
+# Default: ["lib"]
+libs = ["lib", "dependencies"]
+
+# Test contract directories (for future use)
+# Default: ["test"]
+test = ["test"]
+
+# Script directories (for future use)
+# Default: ["script"]
+script = ["script"]
+
+# Path remappings for imports
+# Format: "alias=path"
+# Example: "@openzeppelin/=lib/openzeppelin-contracts/"
+remappings = [
+    "@openzeppelin/=lib/openzeppelin-contracts/",
+    "@chainlink/=lib/chainlink/",
+    "@uniswap/=lib/uniswap/"
+]
+
+# Glob patterns to exclude from compilation
+# Useful for excluding test files or specific contracts
+exclude = [
+    "**/test/**",
+    "**/mock/**",
+    "**/*.t.sol"
+]
+
+# Profile-specific configurations (similar to Foundry)
+# You can define different profiles for different environments
+[profile.default]
+# Default profile settings (inherited by all profiles)
+
+[profile.production]
+# Production-specific settings
+# Could include optimization flags in the future
+
+[profile.development]
+# Development-specific settings
+# Could include debug flags in the future
