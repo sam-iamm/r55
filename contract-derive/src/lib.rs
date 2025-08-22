@@ -1,6 +1,6 @@
 extern crate proc_macro;
 use alloy_core::primitives::U256;
-use alloy_sol_types::SolValue;
+
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
@@ -113,7 +113,7 @@ pub fn error_derive(input: TokenStream) -> TokenStream {
                 let indices: Vec<_> = (0..fields.unnamed.len()).collect();
                 quote!{ selector if selector == #selector_bytes => {
                     let mut values = Vec::new();
-                    #( values.push(<#field_types>::abi_decode(data.unwrap(), true).expect("Unable to decode")); )*
+                    #( values.push(<#field_types>::abi_decode(data.unwrap()).expect("Unable to decode")); )*
                     #name::#variant_name(#(values[#indices]),*)
                 }} 
             },
@@ -154,9 +154,9 @@ pub fn error_derive(input: TokenStream) -> TokenStream {
                 match self { #(#encode_arms),* }
             }
 
-            fn abi_decode(bytes: &[u8], validate: bool) -> Self {
+            fn abi_decode(bytes: &[u8]) -> Self {
                 use alloy_core::primitives::keccak256;
-                use alloy_sol_types::SolValue;
+                
                 use alloc::vec::Vec;
 
                 if bytes.len() < 4 { panic!("Invalid error length") };
@@ -220,7 +220,7 @@ pub fn event_derive(input: TokenStream) -> TokenStream {
 
         impl eth_riscv_runtime::log::Event for #name {
             fn encode_log(&self) -> (alloc::vec::Vec<u8>, alloc::vec::Vec<[u8; 32]>) {
-                use alloy_sol_types::SolValue;
+                
                 use alloy_core::primitives::{keccak256, B256};
                 use alloc::vec::Vec;
 
@@ -358,7 +358,7 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
         quote! {
             #method_selector => {
-                let (#( #arg_names ),*) = <(#( #arg_types ),*)>::abi_decode(calldata, true).expect("abi decode failed");
+                let (#( #arg_names ),*) = <(#( #arg_types ),*)>::abi_decode(calldata).expect("abi decode failed");
                 #checks
                 #return_handling
             }
@@ -376,7 +376,7 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
         #[macro_export]
         macro_rules! emit {
             ($event:ident, $($field:expr),*) => {{
-                use alloy_sol_types::SolValue;
+                
                 use alloy_core::primitives::{keccak256, B256, U256, I256};
                 use alloc::vec::Vec;
 
@@ -430,13 +430,13 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // Generate the complete output with module structure
     let output = quote! {
         use eth_riscv_runtime::*;
-        use alloy_sol_types::SolValue;
+        
 
         // Deploy module
         #[cfg(feature = "deploy")]
             pub mod deploy {
             use super::*;
-            use alloy_sol_types::SolValue;
+            
             use eth_riscv_runtime::*;
 
             #emit_helper
@@ -458,7 +458,7 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
         #[allow(unreachable_code)]
         mod implementation {
             use super::*;
-            use alloy_sol_types::SolValue;
+            
             use eth_riscv_runtime::*;
 
             #emit_helper
