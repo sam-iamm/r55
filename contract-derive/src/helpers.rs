@@ -1,4 +1,4 @@
-
+use std::error::Error;
 
 use alloy_core::primitives::keccak256;
 use alloy_dyn_abi::DynSolType;
@@ -257,9 +257,9 @@ fn generate_method_impl(
                     None
                 );
 
-                match <#ok_type>::abi_decode(&result) {
+                match <#ok_type>::abi_decode(&result, true) {
                     Ok(decoded) => Ok(decoded),
-                    Err(_) => Err(<#err_type>::abi_decode(&result))
+                    Err(_) => Err(<#err_type>::abi_decode(&result, true))
                 }
             }
         },
@@ -279,7 +279,7 @@ fn generate_method_impl(
                         None
                     );
 
-                    match <#return_ty>::abi_decode(&result) {
+                    match <#return_ty>::abi_decode(&result, true) {
                         Ok(decoded) => Some(decoded),
                         Err(_) => None
                     }
@@ -306,7 +306,7 @@ fn generate_method_impl(
                         None
                     );
 
-                    match <#return_ty>::abi_decode(&result) {
+                    match <#return_ty>::abi_decode(&result, true) {
                         Ok(decoded) => Some(decoded),
                         Err(_) => None
                     }
@@ -554,7 +554,7 @@ pub fn generate_deployment_code(
                 // Get encoded constructor args
                 let calldata = eth_riscv_runtime::msg_data();
 
-                let (#(#arg_names),*) = <(#(#arg_types),*)>::abi_decode(&calldata)
+                let (#(#arg_names),*) = <(#(#arg_types),*)>::abi_decode(&calldata, true)
                     .expect("Failed to decode constructor args");
                 #struct_name::new(#(#arg_names),*);
             }
