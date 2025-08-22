@@ -193,6 +193,9 @@ build_from_source() {
 install_linker_scripts_from_repo() {
     local repo_path="$1"
     
+    # Create linker scripts directory before copying
+    mkdir -p "$R55_LINKER_SCRIPTS_DIR"
+    
     if [[ -f "$repo_path/r5-rust-rt.x" ]] && [[ -f "$repo_path/r5-bare-bones.x" ]]; then
         cp "$repo_path/r5-rust-rt.x" "$R55_LINKER_SCRIPTS_DIR/"
         cp "$repo_path/r5-bare-bones.x" "$R55_LINKER_SCRIPTS_DIR/"
