@@ -12,6 +12,7 @@ NC='\033[0m' # No Color
 # Configuration
 R55_DIR="${R55_DIR:-$HOME/.r55}"
 R55_BIN_DIR="$R55_DIR/bin"
+R55_LINKER_SCRIPTS_DIR="$R55_DIR/linker-scripts"
 NIGHTLY_VERSION="nightly-2025-01-07"
 RISCV_TARGET="riscv64imac-unknown-none-elf"
 
@@ -179,11 +180,62 @@ build_from_source() {
     cp "target/release/r55-compile" "$R55_BIN_DIR/"
     chmod +x "$R55_BIN_DIR/r55-compile"
     
+    # Copy linker scripts while we have the repo cloned
+    install_linker_scripts_from_repo "$temp_dir/$REPO_NAME"
+    
     # Clean up
     cd /
     rm -rf "$temp_dir"
     
     log_info "✓ Built from source successfully"
+}
+
+install_linker_scripts_from_repo() {
+    local repo_path="$1"
+    
+    if [[ -f "$repo_path/r5-rust-rt.x" ]] && [[ -f "$repo_path/r5-bare-bones.x" ]]; then
+        cp "$repo_path/r5-rust-rt.x" "$R55_LINKER_SCRIPTS_DIR/"
+        cp "$repo_path/r5-bare-bones.x" "$R55_LINKER_SCRIPTS_DIR/"
+        log_info "✓ Linker scripts copied from repository"
+    fi
+}
+
+install_linker_scripts() {
+    log_info "Installing linker scripts..."
+    
+    # Create linker scripts directory
+    mkdir -p "$R55_LINKER_SCRIPTS_DIR"
+    
+    # Check if linker scripts already exist
+    if [[ -f "$R55_LINKER_SCRIPTS_DIR/r5-rust-rt.x" ]] && [[ -f "$R55_LINKER_SCRIPTS_DIR/r5-bare-bones.x" ]]; then
+        log_info "✓ Linker scripts already installed"
+        return
+    fi
+    
+    # Try to download linker scripts from GitHub
+    log_info "Downloading linker scripts from GitHub..."
+    
+    local scripts=("r5-rust-rt.x" "r5-bare-bones.x")
+    local success=true
+    
+    for script in "${scripts[@]}"; do
+        local url="https://raw.githubusercontent.com/$REPO_OWNER/$REPO_NAME/main/$script"
+        if curl -L -f "$url" -o "$R55_LINKER_SCRIPTS_DIR/$script" 2>/dev/null; then
+            log_info "✓ Downloaded $script"
+        else
+            log_warn "Failed to download $script"
+            success=false
+            break
+        fi
+    done
+    
+    if [[ "$success" == true ]]; then
+        log_info "✓ Linker scripts installed successfully"
+    else
+        log_warn "Failed to download linker scripts, they will be installed if building from source"
+        # Clean up partial downloads
+        rm -f "$R55_LINKER_SCRIPTS_DIR"/*.x
+    fi
 }
 
 setup_path() {
@@ -269,6 +321,7 @@ main() {
     check_prerequisites
     install_rust_dependencies
     download_r55_binary
+    install_linker_scripts
     setup_path
     verify_installation
     

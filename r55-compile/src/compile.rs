@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    env,
     fmt, fs,
     io::Read,
     path::{Path, PathBuf},
@@ -217,6 +218,29 @@ impl Contract {
             .ok_or_else(|| eyre::eyre!("Failed to convert path to string {:?}", self.path))
     }
 
+    fn get_linker_script_path() -> Option<String> {
+        // First, check if there's a local .cargo/config.toml with linker script configuration
+        // If not, use the globally installed linker scripts from r55up
+        
+        // Check for R55_DIR environment variable
+        if let Ok(r55_dir) = env::var("R55_DIR") {
+            let linker_script = format!("{}/linker-scripts/r5-rust-rt.x", r55_dir);
+            if Path::new(&linker_script).exists() {
+                return Some(linker_script);
+            }
+        }
+        
+        // Check default location
+        if let Ok(home) = env::var("HOME") {
+            let linker_script = format!("{}/.r55/linker-scripts/r5-rust-rt.x", home);
+            if Path::new(&linker_script).exists() {
+                return Some(linker_script);
+            }
+        }
+        
+        None
+    }
+
     pub fn compile_r55(&self) -> eyre::Result<Vec<u8>> {
         // First compile runtime
         self.compile_runtime()?;
@@ -233,7 +257,28 @@ impl Contract {
         debug!("Compiling runtime: {}", self.name.package);
 
         let path = self.path_str()?;
-        let status = Command::new("cargo")
+        
+        // Check if there's a local .cargo/config.toml
+        let cargo_config_path = self.path.join(".cargo/config.toml");
+        let cargo_config_alt_path = self.path.join(".cargo/config");
+        
+        let mut cmd = Command::new("cargo");
+        
+        // If no local cargo config exists, set RUSTFLAGS to use global linker scripts
+        if !cargo_config_path.exists() && !cargo_config_alt_path.exists() {
+            if let Some(linker_script) = Self::get_linker_script_path() {
+                let rustflags = format!(
+                    "-C link-arg=-T{} -C llvm-args=--inline-threshold=275",
+                    linker_script
+                );
+                debug!("Setting RUSTFLAGS: {}", rustflags);
+                cmd.env("RUSTFLAGS", rustflags);
+            } else {
+                warn!("No linker scripts found. Compilation may fail. Run 'r55up' to install them.");
+            }
+        }
+        
+        let status = cmd
             .arg("+nightly-2025-01-07")
             .arg("build")
             .arg("-r")
@@ -280,7 +325,28 @@ impl Contract {
         debug!("Compiling deploy: {}", self.name.package);
 
         let path = self.path_str()?;
-        let status = Command::new("cargo")
+        
+        // Check if there's a local .cargo/config.toml
+        let cargo_config_path = self.path.join(".cargo/config.toml");
+        let cargo_config_alt_path = self.path.join(".cargo/config");
+        
+        let mut cmd = Command::new("cargo");
+        
+        // If no local cargo config exists, set RUSTFLAGS to use global linker scripts
+        if !cargo_config_path.exists() && !cargo_config_alt_path.exists() {
+            if let Some(linker_script) = Self::get_linker_script_path() {
+                let rustflags = format!(
+                    "-C link-arg=-T{} -C llvm-args=--inline-threshold=275",
+                    linker_script
+                );
+                debug!("Setting RUSTFLAGS: {}", rustflags);
+                cmd.env("RUSTFLAGS", rustflags);
+            } else {
+                warn!("No linker scripts found. Compilation may fail. Run 'r55up' to install them.");
+            }
+        }
+        
+        let status = cmd
             .arg("+nightly-2025-01-07")
             .arg("build")
             .arg("-r")
