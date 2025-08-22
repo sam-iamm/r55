@@ -113,7 +113,7 @@ pub fn error_derive(input: TokenStream) -> TokenStream {
                 let indices: Vec<_> = (0..fields.unnamed.len()).collect();
                 quote!{ selector if selector == #selector_bytes => {
                     let mut values = Vec::new();
-                    #( values.push(<#field_types>::abi_decode(data.unwrap(), true).expect("Unable to decode")); )*
+                    #( values.push(<#field_types>::abi_decode_validate(data.unwrap()).expect("Unable to decode")); )*
                     #name::#variant_name(#(values[#indices]),*)
                 }} 
             },
@@ -358,7 +358,7 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
         quote! {
             #method_selector => {
-                let (#( #arg_names ),*) = <(#( #arg_types ),*)>::abi_decode(calldata, true).expect("abi decode failed");
+                let (#( #arg_names ),*) = <(#( #arg_types ),*)>::abi_decode_validate(calldata).expect("abi decode failed");
                 #checks
                 #return_handling
             }

@@ -272,7 +272,7 @@ mod tests {
         let expected_slot = U256::from(3);
         assert_eq!(
             read_db_slot(&mut db, erc20, expected_slot),
-            ALICE.into_word().into(),
+            U256::from_be_bytes(ALICE.into_word().0),
         );
     }
 
