@@ -489,6 +489,7 @@ pub fn find_r55_contracts_recursive(dir: &Path) -> HashMap<bool, Vec<ContractWit
 }
 
 /// Find R55 contracts in a single directory (backward compatibility)
+#[allow(dead_code)]
 pub fn find_r55_contracts(dir: &Path) -> HashMap<bool, Vec<ContractWithDeps>> {
     let mut contracts: HashMap<bool, Vec<ContractWithDeps>> = HashMap::new();
 

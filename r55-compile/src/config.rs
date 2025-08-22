@@ -66,6 +66,7 @@ impl R55Config {
     }
     
     /// Load configuration from a specific path
+    #[allow(dead_code)]
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self> {
         let content = fs::read_to_string(path.as_ref())?;
         let config: R55Config = toml::from_str(&content)?;
@@ -138,6 +139,7 @@ impl R55Config {
     }
     
     /// Parse remappings into a HashMap
+    #[allow(dead_code)]
     pub fn get_remappings(&self) -> HashMap<String, String> {
         let mut mappings = HashMap::new();
         
@@ -151,6 +153,7 @@ impl R55Config {
     }
     
     /// Check if a path should be excluded based on exclude patterns
+    #[allow(dead_code)]
     pub fn should_exclude(&self, path: &Path) -> bool {
         for pattern in &self.exclude {
             if let Ok(glob) = glob::Pattern::new(pattern) {
