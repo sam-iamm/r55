@@ -1,0 +1,20 @@
+# R55 Configuration File
+
+# Source directories where contracts are located
+# Currently using examples directory as the main source
+src = ["examples"]
+
+# Output directory for compiled bytecode
+out = "r55-output-bytecode"
+
+# Library directories (currently empty)
+libs = []
+
+# Path remappings (currently none needed)
+remappings = []
+
+# Exclude patterns
+exclude = [
+    "**/target/**",
+    "**/.git/**"
+]

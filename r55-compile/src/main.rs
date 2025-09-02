@@ -1,5 +1,8 @@
 mod compile;
-use compile::{find_r55_contracts, sort_r55_contracts};
+use compile::{find_r55_contracts_in_dirs, sort_r55_contracts};
+
+mod config;
+use config::R55Config;
 
 mod deployable;
 use deployable::generate_deployable;
@@ -15,15 +18,42 @@ fn main() -> eyre::Result<()> {
         .finish();
     tracing::subscriber::set_global_default(tracing_sub)?;
 
-    // Setup output directory
-    let project_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let output_dir = project_root.join("r55-output-bytecode");
+    // Load configuration
+    let config = R55Config::load()?;
+    
+    // Determine project root
+    let project_root = if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        Path::new(&manifest_dir).parent().unwrap().to_path_buf()
+    } else {
+        std::env::current_dir()?
+    };
+    
+    // Setup output directory from config
+    let output_dir = config.get_out_path(&project_root);
     fs::create_dir_all(&output_dir)?;
-
-    // TODO: discuss with Leo and Georgios how would importing r55 as a dependency for SC development should look like
-    // Find all R55 contracts in examples directory
-    let examples_dir = project_root.join("examples");
-    let contracts = find_r55_contracts(&examples_dir);
+    
+    info!("Using configuration:");
+    info!("  Source dirs: {:?}", config.src);
+    info!("  Output dir: {}", config.out);
+    info!("  Library dirs: {:?}", config.libs);
+    
+    // Find all R55 contracts in configured directories
+    let mut search_dirs = config.get_src_paths(&project_root);
+    
+    // Add library directories to search
+    search_dirs.extend(config.get_lib_paths(&project_root));
+    
+    // Fallback to examples directory if no source directories exist or are empty
+    if search_dirs.is_empty() {
+        let examples_dir = project_root.join("examples");
+        if examples_dir.exists() {
+            info!("No source directories configured, falling back to examples/");
+            search_dirs.push(examples_dir);
+        }
+    }
+    
+    info!("Searching for contracts in: {:?}", search_dirs);
+    let contracts = find_r55_contracts_in_dirs(&search_dirs);
 
     // Generate deployable files for the dependencies
     if let Some(contracts_with_deps) = contracts.get(&false) {

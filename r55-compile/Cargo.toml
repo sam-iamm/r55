@@ -12,5 +12,7 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
-toml = "0.8"
+glob = "0.3"
+serde = { version = "1.0", features = ["derive"] }
 syn = { version = "1.0", features = ["full"] }
+toml = "0.8"
