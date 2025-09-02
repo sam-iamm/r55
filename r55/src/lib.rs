@@ -16,7 +16,7 @@ mod tests {
     };
 
     use alloy_core::hex::{self, ToHexExt};
-    use alloy_primitives::B256;
+    use alloy_primitives::{B256, Bytes as AlloyBytes};
     use alloy_sol_types::SolValue;
 
     fn setup_erc20(owner: Address) -> (InMemoryDB, Address) {
@@ -28,8 +28,14 @@ mod tests {
             add_balance_to_db(&mut db, user, 1e18 as u64);
         }
 
-        // Deploy contract
-        let constructor = owner.abi_encode();
+        // Deploy contract (owner, name, symbol, decimals)
+        let constructor = (
+            owner,
+            AlloyBytes::from(b"Token".to_vec()),
+            AlloyBytes::from(b"TKN".to_vec()),
+            U256::from(18u8),
+        )
+            .abi_encode();
         let bytecode = get_bytecode("erc20");
         let erc20 = deploy_contract(&mut db, bytecode, Some(constructor)).unwrap();
 
