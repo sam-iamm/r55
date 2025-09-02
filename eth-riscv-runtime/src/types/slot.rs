@@ -26,7 +26,7 @@ where
 
     fn __read(key: U256) -> Self::Value {
         let bytes: [u8; 32] = sload(key).to_be_bytes();
-        V::abi_decode(&bytes, false).unwrap_or_else(|_| revert())
+        V::abi_decode(&bytes).unwrap_or_else(|_| revert())
     }
 
     fn __write(key: U256, value: Self::Value) {
