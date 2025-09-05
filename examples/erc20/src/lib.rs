@@ -194,4 +194,8 @@ impl ERC20 {
     pub fn allowance(&self, owner: Address, spender: Address) -> U256 {
         self.allowance_of[owner][spender].read()
     }
+
+    pub fn depositAddressBytes(&self, to: Address, data: Bytes) -> FixedBytes<32> {
+        FixedBytes::<32>::from([0x42u8; 32])
+    }
 }
