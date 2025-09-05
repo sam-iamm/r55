@@ -1,4 +1,5 @@
-use alloy_primitives::{Address, B256, U256};
+use alloy_core::hex::{self, FromHex};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_sol_types::SolValue;
 use r55::{
     exec::{deploy_contract, run_tx},
@@ -502,5 +503,62 @@ fn test_erc20_self_transfer() {
     assert!(
         result.matches_custom_error("ERC20Error::SelfTransfer"),
         "Incorrect error signature"
+    );
+}
+
+#[test]
+fn test_deposit_address_bytes_working() {
+    let ERC20Setup {
+        mut db,
+        token,
+        owner,
+    } = erc20_setup(ALICE);
+
+    let to = Address::from([0xbb; 20]);
+    let data = Bytes::from_static(b"some data");
+
+    let selector = get_selector_from_sig("depositAddressBytes(address,bytes)");
+    let calldata = get_calldata(selector, (to, data).abi_encode());
+
+    // 0xb4c9f882000000000000000000000000dddddddddddddddddddddddddddddddddddddddd00000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000009736f6d6520646174610000000000000000000000000000000000000000000000
+    // 0xb4c9f8820000000000000000000000000000000000000000000000000000000000000020000000000000000000000000bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb00000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000009736f6d6520646174610000000000000000000000000000000000000000000000
+    println!("calldata: 0x{}", hex::encode(&calldata));
+    let result = run_tx(&mut db, &token, calldata, &owner)
+        .expect("Error executing tx")
+        .output;
+
+    println!("result: {:?}", result);
+
+    assert_eq!(result.len(), 32, "Incorrect return length");
+    assert_eq!(
+        B256::from_slice(&result),
+        B256::from([0x42u8; 32]),
+        "Incorrect return value"
+    );
+}
+
+#[test]
+fn test_deposit_address_bytes_stack() {
+    let ERC20Setup {
+        mut db,
+        token,
+        owner,
+    } = erc20_setup(ALICE);
+
+    let calldata = Bytes::from_hex("0xb4c9f882000000000000000000000000dddddddddddddddddddddddddddddddddddddddd00000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000009736f6d6520646174610000000000000000000000000000000000000000000000")
+        .unwrap()
+        .to_vec();
+
+    let result = run_tx(&mut db, &token, calldata, &owner)
+        .expect("Error executing tx")
+        .output;
+
+    println!("result: {:?}", result);
+
+    assert_eq!(result.len(), 32, "Incorrect return length");
+    assert_eq!(
+        B256::from_slice(&result),
+        B256::from([0x42u8; 32]),
+        "Incorrect return value"
     );
 }

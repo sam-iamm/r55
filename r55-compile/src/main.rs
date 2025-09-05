@@ -20,29 +20,29 @@ fn main() -> eyre::Result<()> {
 
     // Load configuration
     let config = R55Config::load()?;
-    
+
     // Determine project root
     let project_root = if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
         Path::new(&manifest_dir).parent().unwrap().to_path_buf()
     } else {
         std::env::current_dir()?
     };
-    
+
     // Setup output directory from config
     let output_dir = config.get_out_path(&project_root);
     fs::create_dir_all(&output_dir)?;
-    
+
     info!("Using configuration:");
     info!("  Source dirs: {:?}", config.src);
     info!("  Output dir: {}", config.out);
     info!("  Library dirs: {:?}", config.libs);
-    
+
     // Find all R55 contracts in configured directories
     let mut search_dirs = config.get_src_paths(&project_root);
-    
+
     // Add library directories to search
     search_dirs.extend(config.get_lib_paths(&project_root));
-    
+
     // Fallback to examples directory if no source directories exist or are empty
     if search_dirs.is_empty() {
         let examples_dir = project_root.join("examples");
@@ -51,7 +51,7 @@ fn main() -> eyre::Result<()> {
             search_dirs.push(examples_dir);
         }
     }
-    
+
     info!("Searching for contracts in: {:?}", search_dirs);
     let contracts = find_r55_contracts_in_dirs(&search_dirs);
 

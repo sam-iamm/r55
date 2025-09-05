@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
-    env,
-    fmt, fs,
+    env, fmt, fs,
     io::Read,
     path::{Path, PathBuf},
     process::Command,
@@ -221,7 +220,7 @@ impl Contract {
     fn get_linker_script_path() -> Option<String> {
         // First, check if there's a local .cargo/config.toml with linker script configuration
         // If not, use the globally installed linker scripts from r55up
-        
+
         // Check for R55_DIR environment variable
         if let Ok(r55_dir) = env::var("R55_DIR") {
             let linker_script = format!("{}/linker-scripts/r5-rust-rt.x", r55_dir);
@@ -229,7 +228,7 @@ impl Contract {
                 return Some(linker_script);
             }
         }
-        
+
         // Check default location
         if let Ok(home) = env::var("HOME") {
             let linker_script = format!("{}/.r55/linker-scripts/r5-rust-rt.x", home);
@@ -237,7 +236,7 @@ impl Contract {
                 return Some(linker_script);
             }
         }
-        
+
         None
     }
 
@@ -257,13 +256,13 @@ impl Contract {
         debug!("Compiling runtime: {}", self.name.package);
 
         let path = self.path_str()?;
-        
+
         // Check if there's a local .cargo/config.toml
         let cargo_config_path = self.path.join(".cargo/config.toml");
         let cargo_config_alt_path = self.path.join(".cargo/config");
-        
+
         let mut cmd = Command::new("cargo");
-        
+
         // If no local cargo config exists, set RUSTFLAGS to use global linker scripts
         if !cargo_config_path.exists() && !cargo_config_alt_path.exists() {
             if let Some(linker_script) = Self::get_linker_script_path() {
@@ -274,10 +273,12 @@ impl Contract {
                 debug!("Setting RUSTFLAGS: {}", rustflags);
                 cmd.env("RUSTFLAGS", rustflags);
             } else {
-                warn!("No linker scripts found. Compilation may fail. Run 'r55up' to install them.");
+                warn!(
+                    "No linker scripts found. Compilation may fail. Run 'r55up' to install them."
+                );
             }
         }
-        
+
         let status = cmd
             .arg("+nightly-2025-01-07")
             .arg("build")
@@ -325,13 +326,13 @@ impl Contract {
         debug!("Compiling deploy: {}", self.name.package);
 
         let path = self.path_str()?;
-        
+
         // Check if there's a local .cargo/config.toml
         let cargo_config_path = self.path.join(".cargo/config.toml");
         let cargo_config_alt_path = self.path.join(".cargo/config");
-        
+
         let mut cmd = Command::new("cargo");
-        
+
         // If no local cargo config exists, set RUSTFLAGS to use global linker scripts
         if !cargo_config_path.exists() && !cargo_config_alt_path.exists() {
             if let Some(linker_script) = Self::get_linker_script_path() {
@@ -342,10 +343,12 @@ impl Contract {
                 debug!("Setting RUSTFLAGS: {}", rustflags);
                 cmd.env("RUSTFLAGS", rustflags);
             } else {
-                warn!("No linker scripts found. Compilation may fail. Run 'r55up' to install them.");
+                warn!(
+                    "No linker scripts found. Compilation may fail. Run 'r55up' to install them."
+                );
             }
         }
-        
+
         let status = cmd
             .arg("+nightly-2025-01-07")
             .arg("build")
@@ -394,15 +397,18 @@ impl Contract {
 /// Find R55 contracts in multiple directories (recursively)
 pub fn find_r55_contracts_in_dirs(dirs: &[PathBuf]) -> HashMap<bool, Vec<ContractWithDeps>> {
     let mut all_contracts: HashMap<bool, Vec<ContractWithDeps>> = HashMap::new();
-    
+
     for dir in dirs {
         // Use recursive search for better discovery
         let contracts = find_r55_contracts_recursive(dir);
         for (key, value) in contracts {
-            all_contracts.entry(key).or_insert_with(Vec::new).extend(value);
+            all_contracts
+                .entry(key)
+                .or_insert_with(Vec::new)
+                .extend(value);
         }
     }
-    
+
     all_contracts
 }
 
@@ -411,23 +417,24 @@ pub fn find_r55_contracts_recursive(dir: &Path) -> HashMap<bool, Vec<ContractWit
     let mut contracts: HashMap<bool, Vec<ContractWithDeps>> = HashMap::new();
     let mut temp_contracts = Vec::new();
     let mut temp_idents = HashMap::new();
-    
+
     // Use a stack for iterative directory traversal
     let mut dirs_to_process = vec![dir.to_path_buf()];
-    
+
     while let Some(current_dir) = dirs_to_process.pop() {
         if let Ok(entries) = fs::read_dir(&current_dir) {
             for entry in entries.filter_map(|e| e.ok()) {
                 let path = entry.path();
-                
+
                 // If it's a directory, add to processing queue
                 if path.is_dir() {
                     // Skip common non-contract directories
                     let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    if !dir_name.starts_with('.') && 
-                       dir_name != "target" && 
-                       dir_name != "node_modules" &&
-                       dir_name != "out" {
+                    if !dir_name.starts_with('.')
+                        && dir_name != "target"
+                        && dir_name != "node_modules"
+                        && dir_name != "out"
+                    {
                         // Check if this directory has a Cargo.toml
                         let cargo_path = path.join("Cargo.toml");
                         if cargo_path.exists() {
@@ -469,7 +476,7 @@ pub fn find_r55_contracts_recursive(dir: &Path) -> HashMap<bool, Vec<ContractWit
             }
         }
     }
-    
+
     // Process contracts and resolve identifiers (rest of the original logic)
     for mut c in temp_contracts {
         c.name.ident = temp_idents.get(&c.path).unwrap().to_owned();
@@ -484,7 +491,7 @@ pub fn find_r55_contracts_recursive(dir: &Path) -> HashMap<bool, Vec<ContractWit
             .or_insert_with(Vec::new)
             .push(c);
     }
-    
+
     contracts
 }
 

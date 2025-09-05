@@ -1,8 +1,8 @@
+use eyre::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::fs;
-use eyre::Result;
+use std::path::{Path, PathBuf};
 
 /// Configuration for R55 compilation
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -103,7 +103,8 @@ impl R55Config {
 
     /// Get all source directories as absolute paths
     pub fn get_src_paths(&self, project_root: &Path) -> Vec<PathBuf> {
-        self.src.iter()
+        self.src
+            .iter()
             .map(|dir| {
                 if Path::new(dir).is_absolute() {
                     PathBuf::from(dir)
@@ -126,7 +127,8 @@ impl R55Config {
 
     /// Get library directories as absolute paths
     pub fn get_lib_paths(&self, project_root: &Path) -> Vec<PathBuf> {
-        self.libs.iter()
+        self.libs
+            .iter()
             .map(|dir| {
                 if Path::new(dir).is_absolute() {
                     PathBuf::from(dir)
@@ -208,7 +210,13 @@ mod tests {
         ];
 
         let mappings = config.get_remappings();
-        assert_eq!(mappings.get("@openzeppelin/"), Some(&"lib/openzeppelin-contracts/".to_string()));
-        assert_eq!(mappings.get("@chainlink/"), Some(&"lib/chainlink/".to_string()));
+        assert_eq!(
+            mappings.get("@openzeppelin/"),
+            Some(&"lib/openzeppelin-contracts/".to_string())
+        );
+        assert_eq!(
+            mappings.get("@chainlink/"),
+            Some(&"lib/chainlink/".to_string())
+        );
     }
 }
