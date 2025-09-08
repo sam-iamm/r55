@@ -6,7 +6,7 @@ use core::default::Default;
 use contract_derive::{contract, payable, storage, Event, Error};
 use eth_riscv_runtime::types::*;
 
-use alloy_core::primitives::{Address, U256};
+use alloy_core::primitives::{Address, U256, Bytes, FixedBytes};
 
 extern crate alloc;
 
