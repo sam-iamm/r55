@@ -11,6 +11,7 @@ use revm::InMemoryDB;
 use std::fmt::Write;
 use tracing::info;
 use alloy_core::hex;
+use alloy_dyn_abi::{DynSolType, DynSolValue};
 
 // Helper function to convert bytes to hex string
 fn bytes_to_hex(bytes: &[u8]) -> String {
@@ -354,7 +355,7 @@ fn test_deposit_address_bytes_bytes_address() {
     info!("  data2: 0x{} (length: {})", bytes_to_hex(&test_data2), test_data2.len());
     info!("  address2: {}", BOB);
     
-    let encoded_params = (CAROL, test_data1, test_data2, BOB).abi_encode();
+    let encoded_params = (ALICE, test_data1, test_data2, CAROL).abi_encode();
     info!("Encoded parameters (tuple): 0x{}", bytes_to_hex(&encoded_params));
     info!("Encoded parameters length: {} bytes", encoded_params.len());
     
@@ -491,7 +492,7 @@ fn test_deposit_arbitrary_calldata_alloy_1_3_1() {
         contract,
     } = simple_deposit_setup();
 
-    let calldata_hex = b"0x783c6ddc000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000c0000000000000000000000000000000000000000000000000000000000000000c000000000000000000000000000000000000000000000000000000000000000568656c6c6f0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005776f726c64000000000000000000000000000000000000000000000000000000";
+    let calldata_hex = b"0x486d0d84000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000000000b000000000000000000000000000000000000000000000000000000000000000a4669727374206461746100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000b5365636f6e642064617461000000000000000000000000000000000000000000";
     
     // Parse the hex string to bytes
     let calldata_str = std::str::from_utf8(calldata_hex).unwrap();
@@ -529,10 +530,17 @@ fn test_calldata_encoding_comparison() {
     let SimpleDepositSetup { db: _, contract: _ } = simple_deposit_setup();
 
     // Case 1: depositAddressBytesBytesAddress(address,bytes,bytes,address)
-    let d1 = Bytes::from("hello");
-    let d2 = Bytes::from("world");
-    let params1 = (CAROL, d1, d2, BOB).abi_encode();
-    let alloy_hex1 = b"0x783c6ddc000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000c0000000000000000000000000000000000000000000000000000000000000000c000000000000000000000000000000000000000000000000000000000000000568656c6c6f0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005776f726c64000000000000000000000000000000000000000000000000000000";
+    let d1 = Bytes::from("First data");
+    let d2 = Bytes::from("Second data");
+    let params1 = (ALICE, d1, d2, CAROL).abi_encode();
+    let alloy_hex1 = b"0x783c6ddc000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000c0000000000000000000000000000000000000000000000000000000000000000c000000000000000000000000000000000000000000000000000000000000000a4669727374206461746100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000b5365636f6e642064617461000000000000000000000000000000000000000000";
+    
+    // Log comparable full calldata (selector + encoded params)
+    info!("Alloy 1.3.1 calldata (full failing calldata): {}", std::str::from_utf8(alloy_hex1).unwrap());
+    let selector1 = get_selector_from_sig("depositAddressBytesBytesAddress(address,bytes,bytes,address)");
+    let our_full_calldata1 = get_calldata(selector1, params1.clone());
+    info!("Our 0.8.20 tuple encoding (full working calldata): 0x{}", bytes_to_hex(&our_full_calldata1));
+    
     assert_calldata_encoding(
         "depositAddressBytesBytesAddress(address,bytes,bytes,address)",
         params1,
@@ -571,4 +579,90 @@ fn test_calldata_encoding_comparison() {
             assert_eq!(addr, &bob_word);
         },
     );
+}
+
+#[test]
+fn test_decode_standard_bytes_bytes_address_without_sol_macro() {
+    info!("Decoding standard (bytes,bytes,address) using alloy-dyn-abi without sol! macro");
+    // Build calldata using the same local encoding approach as other r55 tests
+    let selector = get_selector_from_sig("depositBytesBytesAddress(bytes,bytes,address)");
+    let data1 = Bytes::from("First data");
+    let data2 = Bytes::from("Second data");
+    let to = BOB;
+    let params = (data1.clone(), data2.clone(), to).abi_encode();
+    let calldata = get_calldata(selector, params);
+
+    // Decode with alloy-dyn-abi (skip selector). Try tuple-wrapped first; fallback to standard.
+    let args_ty = DynSolType::Tuple(vec![
+        DynSolType::Bytes,
+        DynSolType::Bytes,
+        DynSolType::Address,
+    ]);
+    let wrapped = DynSolType::Tuple(vec![args_ty.clone()]);
+    let values_b = match wrapped.abi_decode_params(&calldata[4..]) {
+        Ok(DynSolValue::Tuple(mut outer)) => {
+            let inner = outer.remove(0);
+            match inner { DynSolValue::Tuple(v) => v, _ => unreachable!("inner tuple") }
+        }
+        _ => match args_ty.abi_decode_params(&calldata[4..]) {
+            Ok(DynSolValue::Tuple(v)) => v,
+            _ => panic!("decode failed both wrapped and standard"),
+        },
+    };
+    assert_eq!(values_b.len(), 3);
+    let b0 = match &values_b[0] { DynSolValue::Bytes(b) => b.clone(), _ => unreachable!() };
+    let b1_dec = match &values_b[1] { DynSolValue::Bytes(b) => b.clone(), _ => unreachable!() };
+    let b2_dec = match &values_b[2] { DynSolValue::Address(a) => *a, _ => unreachable!() };
+    assert_eq!(b0.as_slice(), data1.as_ref());
+    assert_eq!(b1_dec.as_slice(), data2.as_ref());
+    assert_eq!(b2_dec.as_slice(), to.as_slice());
+
+    // Selector sanity check matches function signature keccak4
+    let sig = b"depositBytesBytesAddress(bytes,bytes,address)";
+    let mut expect_sel = [0u8; 4];
+    expect_sel.copy_from_slice(&keccak256(sig)[..4]);
+    assert_eq!(&calldata[..4], &expect_sel);
+}
+
+#[test]
+fn test_decode_address_bytes_bytes_address_without_sol_macro() {
+    info!("Decoding standard (address,bytes,bytes,address) using alloy-dyn-abi without sol! macro");
+    // Build calldata using the same local encoding approach as other r55 tests
+    let selector = get_selector_from_sig("depositAddressBytesBytesAddress(address,bytes,bytes,address)");
+    let params = (ALICE, Bytes::from("First data"), Bytes::from("Second data"), CAROL).abi_encode();
+    let calldata = get_calldata(selector, params);
+
+    // Verify selector
+    assert_eq!(&calldata[..4], &[0x78, 0x3c, 0x6d, 0xdc]);
+
+    // Decode args back (try standard first, then a single-arg tuple-wrapped fallback)
+    let args_ty = DynSolType::Tuple(vec![
+        DynSolType::Address,
+        DynSolType::Bytes,
+        DynSolType::Bytes,
+        DynSolType::Address,
+    ]);
+    let values = match args_ty.abi_decode_params(&calldata[4..]) {
+        Ok(DynSolValue::Tuple(v)) => v,
+        _ => {
+            let wrapped = DynSolType::Tuple(vec![args_ty.clone()]);
+            let DynSolValue::Tuple(mut outer) = wrapped.abi_decode_params(&calldata[4..]).expect("decode wrapped") else { unreachable!("outer tuple") };
+            let inner = outer.remove(0);
+            let DynSolValue::Tuple(inner) = inner else { unreachable!("inner tuple") };
+            inner
+        }
+    };
+    assert_eq!(values.len(), 4);
+
+    let to = match &values[0] { DynSolValue::Address(a) => *a, _ => unreachable!() };
+    let data1 = match &values[1] { DynSolValue::Bytes(b) => b.clone(), _ => unreachable!() };
+    let data2 = match &values[2] { DynSolValue::Bytes(b) => b.clone(), _ => unreachable!() };
+    let to2 = match &values[3] { DynSolValue::Address(a) => *a, _ => unreachable!() };
+
+    assert_eq!(to.as_slice(), ALICE.as_slice());
+    assert_eq!(to2.as_slice(), CAROL.as_slice());
+    assert_eq!(data1.as_slice(), b"First data");
+    assert_eq!(data2.as_slice(), b"Second data");
+
+    // Only verify decoding and selector here (execution is covered elsewhere)
 }
