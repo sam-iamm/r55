@@ -358,7 +358,7 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
         quote! {
             #method_selector => {
-                let (#( #arg_names ),*) = <(#( #arg_types ),*)>::abi_decode(calldata).expect("abi decode failed");
+                let (#( #arg_names ),*) = <(#( #arg_types,)*)>::abi_decode_params(&calldata, true).expect("abi decode failed");
                 #checks
                 #return_handling
             }
@@ -458,7 +458,7 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
         #[allow(unreachable_code)]
         mod implementation {
             use super::*;
-            use alloy_sol_types::SolValue;
+            use alloy_sol_types::{SolValue, SolTypeTuple};
             use eth_riscv_runtime::*;
 
             #emit_helper
