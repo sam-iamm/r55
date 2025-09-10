@@ -480,3 +480,65 @@ fn hydra_l2_bridge() {
     info!("-- BRIDGE TESTS COMPLETED SUCCESSFULLY ------------------");
     info!("----------------------------------------------------------");
 }
+
+#[test]
+fn keccak_deposit_id_equivalent() {
+    initialize_logger();
+
+    let mut db = InMemoryDB::default();
+
+    let alice: Address = address!("000000000000000000000000000000000000000A");
+    let bob: Address = address!("000000000000000000000000000000000000000B");
+    let carol: Address = address!("000000000000000000000000000000000000000C");
+
+    for user in [alice, bob, carol] {
+        add_balance_to_db(&mut db, user, 1e18 as u64);
+    }
+
+    // Deploy SignalService
+    let signal_service = deploy_contract(
+        &mut db,
+        get_bytecode("hydra_l2_signal_service"),
+        Some((alice, Address::ZERO).abi_encode()),
+    )
+    .unwrap();
+
+    // Deploy BridgeEth
+    let bridge = deploy_contract(
+        &mut db,
+        get_bytecode("hydra_l2_bridge"),
+        Some((signal_service, bob).abi_encode()),
+    )
+    .unwrap();
+
+    // Prepare deposit params
+    let selector_deposit = get_selector_from_sig("deposit(address,bytes,bytes,address)");
+    let to = carol;
+    let data = Bytes::from("test deposit data");
+    let context = Bytes::from("test context");
+    let canceler = bob;
+    let deposit_amount = 1e17 as u64; // 0.1 ETH
+
+    // Expected id = keccak256(abi.encode(nonce, from, to, amount, data, context, canceler))
+    // Initial nonce is 0, from = alice, amount = deposit_amount
+    // Change deposit_amount to deposit_amount + 1 to test failure
+    use alloy_core::primitives::keccak256;
+    let expected = keccak256(
+        &(U256::from(0u64), alice, to, U256::from(deposit_amount), data.clone(), context.clone(), canceler)
+            .abi_encode(),
+    );
+
+    // Call deposit
+    let mut calldata = selector_deposit.to_vec();
+    calldata.append(&mut (to, data.clone(), context.clone(), canceler).abi_encode());
+    let result = run_tx_with_value(&mut db, &bridge, calldata, &alice, deposit_amount);
+
+    let returned = match result {
+        revm::primitives::ExecutionResult::Success { output: revm::primitives::Output::Call(output), .. } => {
+            FixedBytes::<32>::from_slice(&output)
+        }
+        other => panic!("Unexpected execution result: {:?}", other),
+    };
+
+    assert_eq!(returned.as_slice(), expected.as_slice(), "deposit should return keccak256(abi.encode(nonce, from, to, amount, data, context, canceler))");
+}
