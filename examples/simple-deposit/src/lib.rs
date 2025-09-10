@@ -289,21 +289,13 @@ impl SimpleDeposit {
     // depositBytesBytesAddress(bytes data, bytes data2, address to) -> bytes32
     // returns bytes32(0x42424242...)
     pub fn depositBytesBytesAddress(&self, _data: Bytes, _data2: Bytes, _to: Address) -> B32 {
-        use alloy_core::primitives::{keccak256, U256};
-        let mut encoded = [0u8; 32];
-        encoded.copy_from_slice(&U256::from(2u8).to_be_bytes::<32>());
-        let hash = keccak256(&encoded);
-        FixedBytes::<32>::from(hash)
+        FixedBytes::<32>::from([0x42u8; 32])
     }
 
     // depositBytesBytesAddres(bytes data, bytes data2, address to) -> bytes32
     // returns bytes32(0x42424242...)
     pub fn depositBytesBytesAddres(&self, _data: Bytes, _data2: Bytes, _to: Address) -> B32 {
-        use alloy_core::primitives::{keccak256, U256};
-        let mut encoded = [0u8; 32];
-        encoded.copy_from_slice(&U256::from(1u8).to_be_bytes::<32>());
-        let hash = keccak256(&encoded);
-        FixedBytes::<32>::from(hash)
+        FixedBytes::<32>::from([0x42u8; 32])
     }
 
     // depositAddressBytesBytesAddress(address to, bytes data, bytes data2, address to2) -> bytes32
@@ -319,7 +311,6 @@ impl SimpleDeposit {
     }
 
     // deposit(address to, bytes data, bytes data2, address to2) -> bytes32
-    // returns bytes32(keccak256(abi.encode(to, data, data2, to2)))
     pub fn deposit(&self, to: Address, data: Bytes, data2: Bytes, to2: Address) -> B32 {
         FixedBytes::<32>::from([0x42u8; 32])
     }
