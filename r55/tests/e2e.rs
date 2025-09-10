@@ -1,12 +1,12 @@
 use alloy_primitives::{address, Address, Bytes, FixedBytes, U256};
 use alloy_sol_types::SolValue;
-use std::fmt::Write;
 use r55::{
     exec::{deploy_contract, run_tx},
     get_bytecode,
     test_utils::{add_balance_to_db, get_selector_from_sig, initialize_logger},
 };
-use revm::{InMemoryDB, Evm};
+use revm::{Evm, InMemoryDB};
+use std::fmt::Write;
 use tracing::{debug, error, info};
 
 // Helper function to convert bytes to hex string
@@ -228,7 +228,7 @@ fn hydra_l2_bridge() {
     info!("----------------------------------------------------------");
     info!("-- DEPLOY SIGNAL SERVICE --------------------------------");
     info!("----------------------------------------------------------");
-    
+
     // Deploy SignalService first
     let signal_service_constructor = (alice, Address::ZERO).abi_encode(); // state_root_publisher, this_address
     let signal_service_bytecode = get_bytecode("hydra_l2_signal_service");
@@ -238,7 +238,7 @@ fn hydra_l2_bridge() {
     info!("----------------------------------------------------------");
     info!("-- DEPLOY BRIDGE -----------------------------------------");
     info!("----------------------------------------------------------");
-    
+
     // Deploy BridgeEth with signal service and counterpart addresses
     let bridge_constructor = (signal_service, bob).abi_encode(); // signal_service, counterpart
     let bridge_bytecode = get_bytecode("hydra_l2_bridge");
@@ -263,7 +263,7 @@ fn hydra_l2_bridge() {
     let test_data = Bytes::from("test deposit data");
     let test_context = Bytes::from("test context");
     let test_canceler = bob;
-    
+
     info!("Function signature: getDepositId(uint256,address,address,uint256,bytes,bytes,address)");
     info!("Function selector: 0x{}", bytes_to_hex(&selector_get_deposit_id));
     
@@ -310,7 +310,7 @@ fn hydra_l2_bridge() {
     info!("----------------------------------------------------------");
     info!("-- TEST PROCESSED FUNCTION (BEFORE DEPOSIT) -------------");
     info!("----------------------------------------------------------");
-    
+
     // Test processed function before any deposit
     let mut calldata_processed = selector_processed.to_vec();
     calldata_processed.append(&mut deposit_id_result.abi_encode());
@@ -322,7 +322,7 @@ fn hydra_l2_bridge() {
             // Should return false (0) for unprocessed deposit
             assert_eq!(res.output, vec![0u8; 32]);
             false
-        },
+        }
         Err(e) => {
             error!("Error when executing processed! {}", e);
             panic!()
@@ -514,8 +514,8 @@ fn keccak_deposit_id_equivalent() {
     // Prepare deposit params
     let selector_deposit = get_selector_from_sig("deposit(address,bytes,bytes,address)");
     let to = carol;
-    let data = Bytes::from("test deposit data");
-    let context = Bytes::from("test context");
+    let data = Bytes::from("First data");
+    let context = Bytes::from("Second data");
     let canceler = bob;
     let deposit_amount = 1e17 as u64; // 0.1 ETH
 
@@ -524,21 +524,86 @@ fn keccak_deposit_id_equivalent() {
     // Change deposit_amount to deposit_amount + 1 to test failure
     use alloy_core::primitives::keccak256;
     let expected = keccak256(
-        &(U256::from(0u64), alice, to, U256::from(deposit_amount), data.clone(), context.clone(), canceler)
+        &(
+            U256::from(0u64),
+            alice,
+            to,
+            U256::from(deposit_amount),
+            data.clone(),
+            context.clone(),
+            canceler,
+        )
             .abi_encode(),
     );
 
     // Call deposit
     let mut calldata = selector_deposit.to_vec();
     calldata.append(&mut (to, data.clone(), context.clone(), canceler).abi_encode());
+
+    // Hex logs
+    use alloy_core::hex;
+    info!("calldata: 0x{}", hex::encode(&calldata));
+
     let result = run_tx_with_value(&mut db, &bridge, calldata, &alice, deposit_amount);
 
     let returned = match result {
-        revm::primitives::ExecutionResult::Success { output: revm::primitives::Output::Call(output), .. } => {
-            FixedBytes::<32>::from_slice(&output)
-        }
+        revm::primitives::ExecutionResult::Success {
+            output: revm::primitives::Output::Call(output),
+            ..
+        } => FixedBytes::<32>::from_slice(&output),
         other => panic!("Unexpected execution result: {:?}", other),
     };
 
+    info!("Expected id: {:?}", expected);
+    info!("Returned id: {:?}", returned);
+
     assert_eq!(returned.as_slice(), expected.as_slice(), "deposit should return keccak256(abi.encode(nonce, from, to, amount, data, context, canceler))");
+}
+
+#[test]
+fn keccak_deposit_id_equivalent_hardcoded_alloy_1_3_1() {
+    initialize_logger();
+
+    let mut db = InMemoryDB::default();
+
+    let alice: Address = address!("000000000000000000000000000000000000000A");
+    let carol: Address = address!("000000000000000000000000000000000000000C");
+
+    for user in [alice, carol] {
+        add_balance_to_db(&mut db, user, 1e18 as u64);
+    }
+
+    // Deploy SignalService and BridgeEth (constructor: signal_service, counterpart)
+    let signal_service = deploy_contract(
+        &mut db,
+        get_bytecode("hydra_l2_signal_service"),
+        Some((alice, Address::ZERO).abi_encode()),
+    )
+    .unwrap();
+    let bridge = deploy_contract(
+        &mut db,
+        get_bytecode("hydra_l2_bridge"),
+        Some((signal_service, carol).abi_encode()),
+    )
+    .unwrap();
+
+    // Hardcoded calldata for deposit(address,bytes,bytes,address)
+    // to = alice, data = "First data", context = "Second data", canceler = carol
+    let calldata_hex = b"0x0a5f93a6000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000c0000000000000000000000000000000000000000000000000000000000000000c000000000000000000000000000000000000000000000000000000000000000a4669727374206461746100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000b5365636f6e642064617461000000000000000000000000000000000000000000";
+
+    let s = core::str::from_utf8(calldata_hex).unwrap();
+    let calldata = alloy_core::hex::decode(&s[2..]).unwrap();
+
+    info!("calldata: 0x{}", bytes_to_hex(&calldata));
+
+    // Execute and log returned value only
+    let out = run_tx_with_value(&mut db, &bridge, calldata, &alice, 1);
+
+    let returned = match out {
+        revm::primitives::ExecutionResult::Success {
+            output: revm::primitives::Output::Call(output),
+            ..
+        } => FixedBytes::<32>::from_slice(&output),
+        other => panic!("Unexpected execution result: {:?}", other),
+    };
 }
