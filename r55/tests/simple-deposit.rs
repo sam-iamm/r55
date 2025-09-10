@@ -70,7 +70,7 @@ fn test_deposit_arbitrary_calldata_alloy_1_3_1() {
     );
 }
 
-// --- Scaffolding tests for arbitrary calldata ---
+// --- Scaffolding tests for standard calldata ---
 
 #[test]
 fn test_calldata_deposit_bytes() {
@@ -206,27 +206,23 @@ fn test_calldata_deposit_address_bytes_bytes_address() {
 #[test]
 fn test_calldata_deposit() {
     let SimpleDepositSetup { mut db, contract } = simple_deposit_setup();
-    let call = depositCall {
-        to: ALICE,
-        data: Bytes::from("Test"),
-        data2: Bytes::from("Test2"),
-        to2: BOB,
-    };
+    let to = ALICE;
+    let data = Bytes::from("Test");
+    let data2 = Bytes::from("Test2");
+    let to2 = BOB;
+    let call = depositCall { to, data: data.clone(), data2: data2.clone(), to2 };
     let calldata = call.abi_encode();
     info!("calldata: 0x{}", hex::encode(&calldata));
     let result = run_tx(&mut db, &contract, calldata, &ALICE)
         .expect("deposit(address,bytes,bytes,address) call failed");
 
     use alloy_core::{hex, primitives::keccak256};
-    let expected = FixedBytes::<32>::from([0x42u8; 32]);
+    use alloy_sol_types::SolValue;
+    let expected = keccak256(&(to, data, data2, to2).abi_encode());
 
     info!("Expected: {:?}", expected); // FixedBytes::<32>::from([0x42u8; 32])
     info!("raw output: 0x{}", hex::encode(&result.output));
-    assert_eq!(
-        result.output.as_slice(),
-        expected.as_slice(),
-        "expected bytes32(0x42424242...)"
-    );
+    assert_eq!(result.output.as_slice(), expected.as_slice());
 }
 
 // --- R55 tuple-encoded tests for all functions ---

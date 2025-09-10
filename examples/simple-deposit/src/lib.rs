@@ -312,6 +312,12 @@ impl SimpleDeposit {
 
     // deposit(address to, bytes data, bytes data2, address to2) -> bytes32
     pub fn deposit(&self, to: Address, data: Bytes, data2: Bytes, to2: Address) -> B32 {
-        FixedBytes::<32>::from([0x42u8; 32])
+        use alloy_core::primitives::keccak256;
+        use alloy_sol_types::SolValue;
+
+        // Encode the arguments exactly as standard ABI (tuple of params)
+        let encoded = (to, data, data2, to2).abi_encode();
+        let hash = keccak256(&encoded);
+        FixedBytes::<32>::from(hash)
     }
 }
