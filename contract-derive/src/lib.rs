@@ -358,7 +358,7 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
         quote! {
             #method_selector => {
-                let (#( #arg_names, )*) = <(#( #arg_types,)*)>::abi_decode_params(&calldata).expect("abi decode failed");
+                let (#( #arg_names, )*) = <(#( #arg_types,)*)>::abi_decode_params_validate(&calldata).expect("abi decode failed");
                 #checks
                 #return_handling
             }

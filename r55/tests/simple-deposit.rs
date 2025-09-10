@@ -67,7 +67,13 @@ fn test_calldata_deposit_bytes() {
     let calldata_hex = b"0x1ac32b94000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000045465737400000000000000000000000000000000000000000000000000000000"; // fill with selector + encoded args for depositBytes(bytes)
     let calldata = decode_calldata_from_hex(calldata_hex);
     let result = run_tx(&mut db, &contract, calldata, &ALICE).expect("depositBytes(bytes) call failed");
-    info!("depositBytes returned: {:?}", Bytes::from(result.output));
+    use alloy_core::{hex, primitives::keccak256};
+    use alloy_sol_types::SolValue;
+
+    // Assert: keccak256(abi.encode("Test"))
+    let expected = keccak256(&alloy_primitives::Bytes::from("Test").abi_encode());
+    assert_eq!(result.output.as_slice(), expected.as_slice(), "expected keccak256(abi.encode(\"Test\"))");
+    info!("raw output: 0x{}", hex::encode(&result.output));
 }
 
 #[test]
