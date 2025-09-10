@@ -17,6 +17,10 @@ sol! {
     function depositAddressBytes(address to, bytes data);
     function depositAddressBytesBytesAddress(address to, bytes data, bytes data2, address to2);
     function deposit(address to, bytes data, bytes data2, address to2);
+    function depositEmptyBytes(bytes data);
+    function depositLongBytes(bytes data);
+    function validateAddress(address addr);
+    function complexParams(address addr1, bytes data1, address addr2, bytes data2, address addr3);
 }
 
 struct SimpleDepositSetup {
@@ -101,35 +105,41 @@ fn test_calldata_deposit_bytes() {
 fn test_calldata_deposit_bytes_address() {
     let SimpleDepositSetup { mut db, contract } = simple_deposit_setup();
 
+    let data = Bytes::from("Test");
+    let to = ALICE;
     let call = depositBytesAddressCall {
-        data: Bytes::from("Test"),
-        to: ALICE,
+        data: data.clone(),
+        to,
     };
     let calldata = call.abi_encode();
     info!("calldata: 0x{}", hex::encode(&calldata));
 
     let result =
-        run_tx(&mut db, &contract, calldata, &ALICE).expect("depositBytes(bytes) call failed");
+        run_tx(&mut db, &contract, calldata, &ALICE).expect("depositBytesAddress(bytes,address) call failed");
 
     use alloy_core::{hex, primitives::keccak256};
-    let expected = FixedBytes::<32>::from([0x42u8; 32]);
+    use alloy_sol_types::SolValue;
+    let expected = keccak256(&(data, to).abi_encode());
 
-    info!("Expected: {:?}", expected); // FixedBytes::<32>::from([0x42u8; 32])
+    info!("Expected: {:?}", expected);
     info!("raw output: 0x{}", hex::encode(&result.output));
     assert_eq!(
         result.output.as_slice(),
         expected.as_slice(),
-        "expected bytes32(0x42424242...)"
+        "expected keccak256(abi.encode(data, to))"
     );
 }
 
 #[test]
 fn test_calldata_deposit_bytes_bytes_address() {
     let SimpleDepositSetup { mut db, contract } = simple_deposit_setup();
+    let data = Bytes::from("Test");
+    let data2 = Bytes::from("Test2");
+    let to = ALICE;
     let call = depositBytesBytesAddressCall {
-        data: Bytes::from("Test"),
-        data2: Bytes::from("Test2"),
-        to: ALICE,
+        data: data.clone(),
+        data2: data2.clone(),
+        to,
     };
     let calldata = call.abi_encode();
     info!("calldata: 0x{}", hex::encode(&calldata));
@@ -138,23 +148,26 @@ fn test_calldata_deposit_bytes_bytes_address() {
         .expect("depositBytesBytesAddress(bytes,bytes,address) call failed");
 
     use alloy_core::{hex, primitives::keccak256};
-    let expected = FixedBytes::<32>::from([0x42u8; 32]);
+    use alloy_sol_types::SolValue;
+    let expected = keccak256(&(data, data2, to).abi_encode());
 
-    info!("Expected: {:?}", expected); // FixedBytes::<32>::from([0x42u8; 32])
+    info!("Expected: {:?}", expected);
     info!("raw output: 0x{}", hex::encode(&result.output));
     assert_eq!(
         result.output.as_slice(),
         expected.as_slice(),
-        "expected bytes32(0x42424242...)"
+        "expected keccak256(abi.encode(data, data2, to))"
     );
 }
 
 #[test]
 fn test_calldata_deposit_address_bytes() {
     let SimpleDepositSetup { mut db, contract } = simple_deposit_setup();
+    let to = ALICE;
+    let data = Bytes::from("Test");
     let call = depositAddressBytesCall {
-        to: ALICE,
-        data: Bytes::from("Test"),
+        to,
+        data: data.clone(),
     };
     let calldata = call.abi_encode();
     info!("calldata: 0x{}", hex::encode(&calldata));
@@ -163,14 +176,15 @@ fn test_calldata_deposit_address_bytes() {
         .expect("depositAddressBytes(address,bytes) call failed");
 
     use alloy_core::{hex, primitives::keccak256};
-    let expected = FixedBytes::<32>::from([0x42u8; 32]);
+    use alloy_sol_types::SolValue;
+    let expected = keccak256(&(to, data).abi_encode());
 
-    info!("Expected: {:?}", expected); // FixedBytes::<32>::from([0x42u8; 32])
+    info!("Expected: {:?}", expected);
     info!("raw output: 0x{}", hex::encode(&result.output));
     assert_eq!(
         result.output.as_slice(),
         expected.as_slice(),
-        "expected bytes32(0x42424242...)"
+        "expected keccak256(abi.encode(to, data))"
     );
 }
 
@@ -178,11 +192,15 @@ fn test_calldata_deposit_address_bytes() {
 #[test]
 fn test_calldata_deposit_address_bytes_bytes_address() {
     let SimpleDepositSetup { mut db, contract } = simple_deposit_setup();
+    let to = ALICE;
+    let data = Bytes::from("Test");
+    let data2 = Bytes::from("Test2");
+    let to2 = BOB;
     let call = depositAddressBytesBytesAddressCall {
-        to: ALICE,
-        data: Bytes::from("Test"),
-        data2: Bytes::from("Test2"),
-        to2: BOB,
+        to,
+        data: data.clone(),
+        data2: data2.clone(),
+        to2,
     };
     let calldata = call.abi_encode();
     info!("calldata: 0x{}", hex::encode(&calldata));
@@ -191,14 +209,15 @@ fn test_calldata_deposit_address_bytes_bytes_address() {
         .expect("depositAddressBytesBytesAddress(address,bytes,bytes,address) call failed");
 
     use alloy_core::{hex, primitives::keccak256};
-    let expected = FixedBytes::<32>::from([0x42u8; 32]);
+    use alloy_sol_types::SolValue;
+    let expected = keccak256(&(to, data, data2, to2).abi_encode());
 
-    info!("Expected: {:?}", expected); // FixedBytes::<32>::from([0x42u8; 32])
+    info!("Expected: {:?}", expected);
     info!("raw output: 0x{}", hex::encode(&result.output));
     assert_eq!(
         result.output.as_slice(),
         expected.as_slice(),
-        "expected bytes32(0x42424242...)"
+        "expected keccak256(abi.encode(to, data, data2, to2))"
     );
 }
 
@@ -380,4 +399,181 @@ fn test_calldata_deposit_r55() {
 
     let result = run_tx(&mut db, &contract, calldata, &ALICE)
         .expect("deposit(address,bytes,bytes,address) failed");
+}
+
+// --- Comprehensive ABI Decoding Tests ---
+
+#[test]
+fn test_empty_bytes_edge_case() {
+    let SimpleDepositSetup { mut db, contract } = simple_deposit_setup();
+    
+    let data = Bytes::from([]); // Empty bytes
+    let call = depositEmptyBytesCall { data: data.clone() };
+    let calldata = call.abi_encode();
+    info!("calldata: 0x{}", hex::encode(&calldata));
+
+    let result = run_tx(&mut db, &contract, calldata, &ALICE)
+        .expect("depositEmptyBytes(bytes) call failed");
+
+    use alloy_core::{hex, primitives::keccak256};
+    use alloy_sol_types::SolValue;
+    let expected = keccak256(&(data,).abi_encode());
+
+    info!("Expected: {:?}", expected);
+    info!("raw output: 0x{}", hex::encode(&result.output));
+    assert_eq!(result.output.as_slice(), expected.as_slice());
+}
+
+#[test]
+fn test_long_bytes_stress_test() {
+    let SimpleDepositSetup { mut db, contract } = simple_deposit_setup();
+    
+    // Create a 1KB string to test large data handling
+    let long_data = "A".repeat(1024);
+    let data = Bytes::from(long_data.into_bytes());
+    let call = depositLongBytesCall { data: data.clone() };
+    let calldata = call.abi_encode();
+    info!("calldata length: {} bytes", calldata.len());
+
+    let result = run_tx(&mut db, &contract, calldata, &ALICE)
+        .expect("depositLongBytes(bytes) call failed");
+
+    use alloy_core::{hex, primitives::keccak256};
+    use alloy_sol_types::SolValue;
+    let expected = keccak256(&(data,).abi_encode());
+
+    info!("Expected: {:?}", expected);
+    info!("raw output: 0x{}", hex::encode(&result.output));
+    assert_eq!(result.output.as_slice(), expected.as_slice());
+}
+
+#[test]
+fn test_address_validation() {
+    let SimpleDepositSetup { mut db, contract } = simple_deposit_setup();
+    
+    let addr = CAROL; // Use a different address
+    let call = validateAddressCall { addr };
+    let calldata = call.abi_encode();
+    info!("calldata: 0x{}", hex::encode(&calldata));
+
+    let result = run_tx(&mut db, &contract, calldata, &ALICE)
+        .expect("validateAddress(address) call failed");
+
+    use alloy_core::{hex, primitives::keccak256};
+    use alloy_sol_types::SolValue;
+    let expected = keccak256(&(addr,).abi_encode());
+
+    info!("Expected: {:?}", expected);
+    info!("raw output: 0x{}", hex::encode(&result.output));
+    assert_eq!(result.output.as_slice(), expected.as_slice());
+}
+
+#[test]
+fn test_complex_parameters() {
+    let SimpleDepositSetup { mut db, contract } = simple_deposit_setup();
+    
+    let addr1 = ALICE;
+    let data1 = Bytes::from("FirstData");
+    let addr2 = BOB;
+    let data2 = Bytes::from("SecondData");
+    let addr3 = CAROL;
+    
+    let call = complexParamsCall {
+        addr1,
+        data1: data1.clone(),
+        addr2,
+        data2: data2.clone(),
+        addr3,
+    };
+    let calldata = call.abi_encode();
+    info!("calldata: 0x{}", hex::encode(&calldata));
+
+    let result = run_tx(&mut db, &contract, calldata, &ALICE)
+        .expect("complexParams(address,bytes,address,bytes,address) call failed");
+
+    use alloy_core::{hex, primitives::keccak256};
+    use alloy_sol_types::SolValue;
+    let expected = keccak256(&(addr1, data1, addr2, data2, addr3).abi_encode());
+
+    info!("Expected: {:?}", expected);
+    info!("raw output: 0x{}", hex::encode(&result.output));
+    assert_eq!(result.output.as_slice(), expected.as_slice());
+}
+
+#[test]
+fn test_manual_calldata_verification() {
+    let SimpleDepositSetup { mut db, contract } = simple_deposit_setup();
+    
+    // Test with the exact calldata you provided earlier (hardcoded, standard abi encoded calldata)
+    let manual_calldata_hex = b"0x0a5f93a6000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000c0000000000000000000000000000000000000000000000000000000000000000b0000000000000000000000000000000000000000000000000000000000000004546573740000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000055465737432000000000000000000000000000000000000000000000000000000";
+    
+    let calldata = decode_calldata_from_hex(manual_calldata_hex);
+    info!("Manual calldata: 0x{}", hex::encode(&calldata));
+
+    let result = run_tx(&mut db, &contract, calldata, &ALICE)
+        .expect("Manual calldata test failed");
+
+    // Expected: keccak256(abi.encode(0x000000000000000000000000000000000000000A, "Test", "Test2", 0x000000000000000000000000000000000000000B))
+    use alloy_core::{hex, primitives::keccak256};
+    use alloy_sol_types::SolValue;
+    let expected_to = Address::from([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0A]);
+    let expected_data = Bytes::from("Test");
+    let expected_data2 = Bytes::from("Test2");
+    let expected_to2 = Address::from([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0B]);
+    let expected = keccak256(&(expected_to, expected_data, expected_data2, expected_to2).abi_encode());
+
+    info!("Expected: {:?}", expected);
+    info!("raw output: 0x{}", hex::encode(&result.output));
+    assert_eq!(result.output.as_slice(), expected.as_slice());
+}
+
+#[test]
+fn test_different_address_values() {
+    let SimpleDepositSetup { mut db, contract } = simple_deposit_setup();
+    
+    // Test with different address combinations
+    let test_cases = vec![
+        (ALICE, BOB),
+        (BOB, CAROL),
+        (CAROL, ALICE),
+    ];
+    
+    for (addr1, addr2) in test_cases {
+        let call = validateAddressCall { addr: addr1 };
+        let calldata = call.abi_encode();
+        
+        let result = run_tx(&mut db, &contract, calldata, &ALICE)
+            .expect("validateAddress(address) call failed");
+
+        use alloy_core::primitives::keccak256;
+        use alloy_sol_types::SolValue;
+        let expected = keccak256(&(addr1,).abi_encode());
+
+        assert_eq!(result.output.as_slice(), expected.as_slice(), 
+            "Failed for address {:?}", addr1);
+    }
+}
+
+#[test]
+fn test_various_byte_lengths() {
+    let SimpleDepositSetup { mut db, contract } = simple_deposit_setup();
+    
+    // Test different byte lengths: 0, 1, 31, 32, 33, 64, 100
+    let test_lengths = vec![0, 1, 31, 32, 33, 64, 100];
+    
+    for len in test_lengths {
+        let data = Bytes::from(vec![0xAB; len]);
+        let call = depositEmptyBytesCall { data: data.clone() };
+        let calldata = call.abi_encode();
+        
+        let result = run_tx(&mut db, &contract, calldata, &ALICE)
+            .expect("depositEmptyBytes(bytes) call failed");
+
+        use alloy_core::primitives::keccak256;
+        use alloy_sol_types::SolValue;
+        let expected = keccak256(&(data,).abi_encode());
+
+        assert_eq!(result.output.as_slice(), expected.as_slice(), 
+            "Failed for byte length {}", len);
+    }
 }

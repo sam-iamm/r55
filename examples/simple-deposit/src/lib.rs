@@ -281,33 +281,58 @@ impl SimpleDeposit {
     }
 
     // depositBytesAddress(bytes data, address to) -> bytes32
-    // returns bytes32(0x42424242...)
-    pub fn depositBytesAddress(&self, _data: Bytes, _to: Address) -> B32 {
-        FixedBytes::<32>::from([0x42u8; 32])
+    // returns keccak256(abi.encode(data, to))
+    pub fn depositBytesAddress(&self, data: Bytes, to: Address) -> B32 {
+        use alloy_core::primitives::keccak256;
+        use alloy_sol_types::SolValue;
+        
+        let encoded = (data, to).abi_encode();
+        let hash = keccak256(&encoded);
+        FixedBytes::<32>::from(hash)
     }
 
     // depositBytesBytesAddress(bytes data, bytes data2, address to) -> bytes32
-    // returns bytes32(0x42424242...)
-    pub fn depositBytesBytesAddress(&self, _data: Bytes, _data2: Bytes, _to: Address) -> B32 {
-        FixedBytes::<32>::from([0x42u8; 32])
+    // returns keccak256(abi.encode(data, data2, to))
+    pub fn depositBytesBytesAddress(&self, data: Bytes, data2: Bytes, to: Address) -> B32 {
+        use alloy_core::primitives::keccak256;
+        use alloy_sol_types::SolValue;
+        
+        let encoded = (data, data2, to).abi_encode();
+        let hash = keccak256(&encoded);
+        FixedBytes::<32>::from(hash)
     }
 
     // depositBytesBytesAddres(bytes data, bytes data2, address to) -> bytes32
-    // returns bytes32(0x42424242...)
-    pub fn depositBytesBytesAddres(&self, _data: Bytes, _data2: Bytes, _to: Address) -> B32 {
-        FixedBytes::<32>::from([0x42u8; 32])
+    // returns keccak256(abi.encode(data, data2, to))
+    pub fn depositBytesBytesAddres(&self, data: Bytes, data2: Bytes, to: Address) -> B32 {
+        use alloy_core::primitives::keccak256;
+        use alloy_sol_types::SolValue;
+        
+        let encoded = (data, data2, to).abi_encode();
+        let hash = keccak256(&encoded);
+        FixedBytes::<32>::from(hash)
     }
 
     // depositAddressBytesBytesAddress(address to, bytes data, bytes data2, address to2) -> bytes32
-    // returns bytes32(0x42424242...)
-    pub fn depositAddressBytesBytesAddress(&self, _to: Address, _data: Bytes, _data2: Bytes, _to2: Address) -> B32 {
-        FixedBytes::<32>::from([0x42u8; 32])
+    // returns keccak256(abi.encode(to, data, data2, to2))
+    pub fn depositAddressBytesBytesAddress(&self, to: Address, data: Bytes, data2: Bytes, to2: Address) -> B32 {
+        use alloy_core::primitives::keccak256;
+        use alloy_sol_types::SolValue;
+        
+        let encoded = (to, data, data2, to2).abi_encode();
+        let hash = keccak256(&encoded);
+        FixedBytes::<32>::from(hash)
     }
 
     // depositAddressBytes(address to, bytes data) -> bytes32
-    // returns bytes32(0x42424242...)
-    pub fn depositAddressBytes(&self, _to: Address, _data: Bytes) -> B32 {
-        FixedBytes::<32>::from([0x42u8; 32])
+    // returns keccak256(abi.encode(to, data))
+    pub fn depositAddressBytes(&self, to: Address, data: Bytes) -> B32 {
+        use alloy_core::primitives::keccak256;
+        use alloy_sol_types::SolValue;
+        
+        let encoded = (to, data).abi_encode();
+        let hash = keccak256(&encoded);
+        FixedBytes::<32>::from(hash)
     }
 
     // deposit(address to, bytes data, bytes data2, address to2) -> bytes32
@@ -317,6 +342,47 @@ impl SimpleDeposit {
 
         // Encode the arguments exactly as standard ABI (tuple of params)
         let encoded = (to, data, data2, to2).abi_encode();
+        let hash = keccak256(&encoded);
+        FixedBytes::<32>::from(hash)
+    }
+
+    // Edge case: empty bytes
+    pub fn depositEmptyBytes(&self, data: Bytes) -> B32 {
+        use alloy_core::primitives::keccak256;
+        use alloy_sol_types::SolValue;
+        
+        let encoded = (data,).abi_encode();
+        let hash = keccak256(&encoded);
+        FixedBytes::<32>::from(hash)
+    }
+
+    // Edge case: very long bytes (stress test)
+    pub fn depositLongBytes(&self, data: Bytes) -> B32 {
+        use alloy_core::primitives::keccak256;
+        use alloy_sol_types::SolValue;
+        
+        let encoded = (data,).abi_encode();
+        let hash = keccak256(&encoded);
+        FixedBytes::<32>::from(hash)
+    }
+
+    // Parameter validation: return specific value based on decoded address
+    pub fn validateAddress(&self, addr: Address) -> B32 {
+        use alloy_core::primitives::keccak256;
+        use alloy_sol_types::SolValue;
+        
+        // Return hash of the address to prove it was decoded correctly
+        let encoded = (addr,).abi_encode();
+        let hash = keccak256(&encoded);
+        FixedBytes::<32>::from(hash)
+    }
+
+    // Complex parameter combination test
+    pub fn complexParams(&self, addr1: Address, data1: Bytes, addr2: Address, data2: Bytes, addr3: Address) -> B32 {
+        use alloy_core::primitives::keccak256;
+        use alloy_sol_types::SolValue;
+        
+        let encoded = (addr1, data1, addr2, data2, addr3).abi_encode();
         let hash = keccak256(&encoded);
         FixedBytes::<32>::from(hash)
     }
