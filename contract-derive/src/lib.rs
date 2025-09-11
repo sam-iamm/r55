@@ -110,12 +110,13 @@ pub fn error_derive(input: TokenStream) -> TokenStream {
             Fields::Unit => quote! { selector if selector == #selector_bytes => #name::#variant_name },
             Fields::Unnamed(fields) => {
                 let field_types: Vec<_> = fields.unnamed.iter().map(|f| &f.ty).collect();
-                let indices: Vec<_> = (0..fields.unnamed.len()).collect();
+                let vars: Vec<_> = (0..fields.unnamed.len())
+                    .map(|i| format_ident!("_{}", i))
+                    .collect();
                 quote!{ selector if selector == #selector_bytes => {
-                    let mut values = Vec::new();
-                    #( values.push(<#field_types>::abi_decode(data.unwrap()).expect("Unable to decode")); )*
-                    #name::#variant_name(#(values[#indices]),*)
-                }} 
+                    let (#(#vars,)*) = <(#(#field_types,)*)>::abi_decode_params_validate(data.unwrap()).expect("Unable to decode error args");
+                    #name::#variant_name(#(#vars),*)
+                }}
             },
             Fields::Named(_) => panic!("Named fields are not supported"),
         }
@@ -358,7 +359,7 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
         quote! {
             #method_selector => {
-                let (#( #arg_names ),*) = <(#( #arg_types,)*)>::abi_decode_params(&calldata, true).expect("abi decode failed");
+                let (#(#arg_names,)*) = <(#(#arg_types,)*)>::abi_decode_params_validate(&calldata).expect("abi decode failed");
                 #checks
                 #return_handling
             }
@@ -458,7 +459,7 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
         #[allow(unreachable_code)]
         mod implementation {
             use super::*;
-            use alloy_sol_types::{SolValue, SolTypeTuple};
+            use alloy_sol_types::SolValue;
             use eth_riscv_runtime::*;
 
             #emit_helper

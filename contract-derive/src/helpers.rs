@@ -554,7 +554,7 @@ pub fn generate_deployment_code(
                 // Get encoded constructor args
                 let calldata = eth_riscv_runtime::msg_data();
 
-                let (#(#arg_names),*) = <(#(#arg_types),*)>::abi_decode(&calldata)
+                let (#(#arg_names,)*) = <(#(#arg_types,)*)>::abi_decode_params_validate(&calldata)
                     .expect("Failed to decode constructor args");
                 #struct_name::new(#(#arg_names),*);
             }
