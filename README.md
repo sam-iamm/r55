@@ -112,13 +112,19 @@ running two transactions on it, first a `mint` then a `balance_of` check.
 You'll need to install Rust's RISCV toolchain:
 
 ```console
-$ rustup install nightly-2024-02-01-x86_64-unknown-linux-gnu
+$ rustup install nightly-2025-01-07
+$ rustup target add riscv64imac-unknown-none-elf --toolchain nightly-2025-01-07
 ```
+
+**Note:** The project now automatically uses the correct toolchain via `rust-toolchain.toml`. You can simply run `cargo test` without manual toolchain switching.
 
 Now run:
 
 ```console
 $ cargo test --package r55 --test e2e -- erc20 --exact --show-output
+
+**Note:** You can now use simple cargo commands like `cargo test --test e2e` without the nightly prefix!
+
 ...
 Compiling deploy: erc20
 Cargo command completed successfully
@@ -167,4 +173,60 @@ graph TD;
     revm --> revm-r55
     rvemu-r55 --> revm-r55
     eth-riscv-runtime --> revm-r55
+
+# Development
+
+## Quick Start
+
+This project automatically uses the required Rust nightly toolchain. Simply clone and run:
+
+```bash
+# Clone the repository
+git clone <your-repo-url>
+cd r55
+
+# Run tests
+cargo test
+
+# Build the project
+cargo build
+
+# Compile contracts
+cd r55-compile
+cargo run
 ```
+
+## Available Commands
+
+```bash
+# Run all tests
+cargo test
+
+# Run specific test files
+cargo test --test e2e
+cargo test --test erc20
+cargo test --test erc721
+
+# Build the project
+cargo build
+
+# Clean build artifacts
+cargo clean
+
+# Compile all contracts (generates bytecode)
+cd r55-compile
+cargo run
+```
+
+## Project Structure
+
+- `examples/` - Example smart contracts (ERC20, ERC721, etc.)
+- `r55/` - Main R55 runtime and tests
+- `r55-compile/` - Contract compilation tool
+- `r55-output-bytecode/` - Generated contract bytecode
+- `contract-derive/` - Contract macro implementation
+- `eth-riscv-runtime/` - RISC-V runtime for smart contracts
+
+## Toolchain Requirements
+
+The project automatically uses Rust nightly-2025-01-07 with RISC-V target support. No manual toolchain switching is required.

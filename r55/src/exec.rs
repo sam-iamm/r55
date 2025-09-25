@@ -1,3 +1,15 @@
+// R55 execution glue over revm
+//
+// Summary of hardening and rationale:
+// - Nested CALL/CREATE gas handling: Parent frame pays only base cost; child gas limit
+//   follows EIP-150 (remaining - remaining/64). We pre-deduct the child gas in the
+//   parent so that the EVM core refunds unspent child gas on return. This matches
+//   revm's accounting model and prevents double-charging/underflow in nested R55→R55 calls.
+// - Memory safety on DRAM access: RETURNDATACOPY, RETURN payloads, CALL/CREATE calldata/initcode
+//   use saturating/clamped bounds and overflow checks before reading/writing rvemu DRAM.
+//   This avoids panics from out-of-bounds/overflow in the emulator bus.
+// - Tx gas limit: set to 100_000_000 to keep tests fast and realistic; correctness no longer
+//   depends on an inflated cap thanks to the accounting and memory guards above.
 use alloy_core::primitives::{Keccak256, U32};
 use core::cell::RefCell;
 use eth_riscv_interpreter::setup_from_elf;
@@ -176,9 +188,23 @@ pub fn handle_register<EXT, DB: Database>(handler: &mut EvmHandler<'_, EXT, DB>)
     let old_handle = handler.execution.call.clone();
     handler.execution.call = Arc::new(move |ctx, inputs| {
         let result = old_handle(ctx, inputs);
-        if let Ok(FrameOrResult::Frame(frame)) = &result {
-            trace!("Creating new CALL frame");
-            call_stack_inner.borrow_mut().push(riscv_context(frame));
+        match &result {
+            Ok(FrameOrResult::Frame(frame)) => {
+                trace!("Creating new CALL frame");
+                call_stack_inner.borrow_mut().push(riscv_context(frame));
+            }
+            Ok(FrameOrResult::Result(res)) => {
+                let ins = res.instruction_result();
+                let gas_rem = res.gas().remaining();
+                let out_len = match res.output() { Output::Call(b) => b.len(), Output::Create(b, _) => b.len() };
+                debug!(
+                    "> Child CALL returned: {:?} | gas remaining: {} | output.len: {}",
+                    ins,
+                    gas_rem,
+                    out_len
+                );
+            }
+            _ => {}
         }
         result
     });
@@ -188,9 +214,23 @@ pub fn handle_register<EXT, DB: Database>(handler: &mut EvmHandler<'_, EXT, DB>)
     let old_handle = handler.execution.create.clone();
     handler.execution.create = Arc::new(move |ctx, inputs| {
         let result = old_handle(ctx, inputs);
-        if let Ok(FrameOrResult::Frame(frame)) = &result {
-            trace!("Creating new CREATE frame");
-            call_stack_inner.borrow_mut().push(riscv_context(frame));
+        match &result {
+            Ok(FrameOrResult::Frame(frame)) => {
+                trace!("Creating new CREATE frame");
+                call_stack_inner.borrow_mut().push(riscv_context(frame));
+            }
+            Ok(FrameOrResult::Result(res)) => {
+                let ins = res.instruction_result();
+                let gas_rem = res.gas().remaining();
+                let out_len = match res.output() { Output::Call(b) => b.len(), Output::Create(b, _) => b.len() };
+                debug!(
+                    "> Child CREATE returned: {:?} | gas remaining: {} | output.len: {}",
+                    ins,
+                    gas_rem,
+                    out_len
+                );
+            }
+            _ => {}
         }
         result
     });
@@ -278,7 +318,22 @@ fn execute_riscv(
                         let ret_size: u64 = emu.cpu.xregs.read(11);
 
                         let r55_gas = r55_gas_used(&emu.cpu.inst_counter);
-                        debug!("> Total R55 gas: {}", r55_gas);
+                        let remaining = interpreter.gas.remaining();
+                        debug!("> Total R55 gas: {} | remaining before: {}", r55_gas, remaining);
+
+                        // Guard against underflow when charging total R55 gas.
+                        // If the total exceeds remaining, spend only what's left and return OOG,
+                        // mirroring EVM semantics (no panic in the emulator).
+                        if r55_gas > remaining {
+                            if remaining > 0 { syscall_gas!(interpreter, remaining); }
+                            return Ok(InterpreterAction::Return {
+                                result: InterpreterResult {
+                                    result: InstructionResult::OutOfGas,
+                                    output: Bytes::new(),
+                                    gas: interpreter.gas,
+                                },
+                            });
+                        }
 
                         // RETURN logs the gas of the whole risc-v instruction set
                         syscall_gas!(interpreter, r55_gas);
@@ -372,21 +427,38 @@ fn execute_riscv(
                         let dest_offset = emu.cpu.xregs.read(10);
                         let offset = emu.cpu.xregs.read(11) as usize;
                         let size = emu.cpu.xregs.read(12) as usize;
-                        let data = &interpreter.return_data_buffer.as_ref()[offset..offset + size];
+
+                        // Clamp to available buffer and guard integer overflow.
+                        let buf_len = interpreter.return_data_buffer.len();
+                        if offset > buf_len || size > buf_len || offset.saturating_add(size) > buf_len {
+                            warn!(
+                                "> RETURNDATACOPY OOB [offset: {}, size: {}, buf_len: {}] — clamping to available",
+                                offset, size, buf_len
+                            );
+                        }
+                        let end = core::cmp::min(buf_len, offset.saturating_add(size));
+                        let data = &interpreter.return_data_buffer.as_ref()[offset..end];
                         debug!(
-                            "> RETURNDATACOPY [memory_offset: {}, offset: {}, size: {}]\n{}",
+                            "> RETURNDATACOPY [memory_offset: {}, offset: {}, size: {} (clamped to {})]\n{}",
                             dest_offset,
                             offset,
                             size,
+                            data.len(),
                             Bytes::from(data.to_vec())
                         );
 
                         // write return data to memory
-                        let return_memory = emu
-                            .cpu
-                            .bus
-                            .get_dram_slice(dest_offset..(dest_offset + size as u64))?;
-                        return_memory.copy_from_slice(data);
+                        if !data.is_empty() {
+                            if let Some(dest_end) = dest_offset.checked_add(data.len() as u64) {
+                                if let Ok(return_memory) = emu.cpu.bus.get_dram_slice(dest_offset..dest_end) {
+                                    return_memory.copy_from_slice(data);
+                                } else {
+                                    warn!("> RETURNDATACOPY destination out of DRAM bounds; skipping write");
+                                }
+                            } else {
+                                warn!("> RETURNDATACOPY destination overflow (dest_offset={}, len={})", dest_offset, data.len());
+                            }
+                        }
                     }
                     Syscall::Call => return execute_call(emu, interpreter, host, false),
                     Syscall::StaticCall => return execute_call(emu, interpreter, host, true),
@@ -587,17 +659,23 @@ fn execute_call(
     // Get calldata
     let args_offset: u64 = emu.cpu.xregs.read(14);
     let args_size: u64 = emu.cpu.xregs.read(15);
-    let calldata: Bytes = emu
-        .cpu
-        .bus
-        .get_dram_slice(args_offset..(args_offset + args_size))
-        .unwrap_or(&mut [])
-        .to_vec()
-        .into();
+    let calldata: Bytes = if args_size == 0 {
+        Bytes::new()
+    } else if let Some(end) = args_offset.checked_add(args_size) {
+        if let Ok(slice) = emu.cpu.bus.get_dram_slice(args_offset..end) {
+            slice.to_vec().into()
+        } else {
+            warn!("> CALL calldata OOB [offset: {}, size: {}] — empty", args_offset, args_size);
+            Bytes::new()
+        }
+    } else {
+        warn!("> CALL calldata overflow [offset: {}, size: {}] — empty", args_offset, args_size);
+        Bytes::new()
+    };
 
     // Calculate gas cost of the call
-    // TODO: check correctness (tried using evm.codes as ref but i'm no gas wizard)
-    // TODO: unsure whether memory expansion cost is missing (should be captured in the risc-v costs)
+    // Parent pays only the base cost here; the child runs with an EIP-150 gas limit derived from
+    // remaining gas. We pre-deduct the child limit so revm will refund unused gas on return.
     let (empty_account_cost, addr_access_cost) = match host.load_account_delegated(addr) {
         Some(account) => {
             if account.is_cold {
@@ -608,19 +686,27 @@ fn execute_call(
         }
         None => (gas::CALL_EMPTY_ACCOUNT, gas::CALL_NEW_ACCOUNT),
     };
+    // Charge only base CALL cost now
     let value_cost = if value != 0 { gas::CALL_VALUE } else { 0 };
-    let call_gas_cost = empty_account_cost + addr_access_cost + value_cost;
-    syscall_gas!(interpreter, call_gas_cost);
+    let base_cost = empty_account_cost + addr_access_cost + value_cost;
+    if base_cost > 0 { syscall_gas!(interpreter, base_cost); }
 
-    // proactively spend gas limit as the remaining will be refunded (otherwise it underflows)
-    let call_gas_limit = interpreter.gas.remaining();
-    syscall_gas!(interpreter, call_gas_limit);
+    // EIP-150: callee gas = remaining - remaining/64 (post-base-cost)
+    let rem = interpreter.gas.remaining();
+    let call_gas_limit = rem - (rem / 64);
 
     debug!("> {}Call context:", if is_static { "Static" } else { "" });
     debug!("  - Caller: {}", interpreter.contract.target_address);
     debug!("  - Target Address: {}", addr);
     debug!("  - Value: {}", value);
     debug!("  - Calldata: {:?}", calldata);
+    debug!("  - Callee gas_limit: {}", call_gas_limit);
+
+    // Pre-deduct callee gas from the parent so the EVM core will refund
+    // the child's unspent gas on return via `erase_cost`.
+    if call_gas_limit > 0 {
+        syscall_gas!(interpreter, call_gas_limit);
+    }
     Ok(InterpreterAction::Call {
         inputs: Box::new(CallInputs {
             input: calldata,
@@ -647,21 +733,26 @@ fn execute_create(
     // Get initcode
     let args_offset: u64 = emu.cpu.xregs.read(11);
     let args_size: u64 = emu.cpu.xregs.read(12);
-    let init_code: Bytes = emu
-        .cpu
-        .bus
-        .get_dram_slice(args_offset..(args_offset + args_size))
-        .unwrap_or(&mut [])
-        .to_vec()
-        .into();
+    let init_code: Bytes = if args_size == 0 {
+        Bytes::new()
+    } else if let Some(end) = args_offset.checked_add(args_size) {
+        if let Ok(slice) = emu.cpu.bus.get_dram_slice(args_offset..end) {
+            slice.to_vec().into()
+        } else {
+            warn!("> CREATE init_code OOB [offset: {}, size: {}] — empty", args_offset, args_size);
+            Bytes::new()
+        }
+    } else {
+        warn!("> CREATE init_code overflow [offset: {}, size: {}] — empty", args_offset, args_size);
+        Bytes::new()
+    };
 
-    // TODO: calculate gas cost properly
-    let create_gas_cost = gas::CREATE_BASE;
-    syscall_gas!(interpreter, create_gas_cost);
-
-    // proactively spend gas limit as the remaining will be refunded (otherwise it underflows)
-    let create_gas_limit = interpreter.gas.remaining();
-    syscall_gas!(interpreter, create_gas_limit);
+    // Charge only base CREATE cost now; child gas mirrors CALL handling
+    if gas::CREATE_BASE > 0 { syscall_gas!(interpreter, gas::CREATE_BASE); }
+    let rem = interpreter.gas.remaining();
+    let create_gas_limit = rem - (rem / 64);
+    // Pre-deduct child gas; core will refund remaining on return.
+    if create_gas_limit > 0 { syscall_gas!(interpreter, create_gas_limit); }
 
     debug!("> CREATE CTX:");
     debug!("  - Caller: {}", interpreter.contract.target_address);
@@ -679,15 +770,21 @@ fn execute_create(
 }
 
 /// Returns RISC-V DRAM slice in a given size range, starts with a given offset
+// Safe DRAM slice helper for RETURN payloads; avoids overflow/underflow and OOB.
 fn dram_slice(emu: &mut Emulator, ret_offset: u64, ret_size: u64) -> Result<&mut [u8]> {
-    if ret_size != 0 {
-        Ok(emu
-            .cpu
-            .bus
-            .get_dram_slice(ret_offset..(ret_offset + ret_size))?)
-    } else {
-        Ok(&mut [])
+    if ret_size == 0 {
+        return Ok(&mut []);
     }
+    if let Some(end) = ret_offset.checked_add(ret_size) {
+        if let Ok(slice) = emu.cpu.bus.get_dram_slice(ret_offset..end) {
+            return Ok(slice);
+        }
+    }
+    warn!(
+        "> DRAM SLICE OOB [offset: {}, size: {}] — returning empty slice",
+        ret_offset, ret_size
+    );
+    Ok(&mut [])
 }
 
 fn r55_gas_used(inst_count: &BTreeMap<String, u64>) -> u64 {

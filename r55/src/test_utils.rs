@@ -30,6 +30,17 @@ pub fn add_balance_to_db(db: &mut InMemoryDB, addr: Address, value: u64) {
     db.insert_account_info(addr, AccountInfo::from_balance(U256::from(value)));
 }
 
+// Preserve existing code/nonce, only increase balance
+pub fn add_balance_preserve_code(db: &mut InMemoryDB, addr: Address, value: u64) {
+    let mut info = db
+        .basic(addr)
+        .unwrap()
+        .unwrap_or(AccountInfo::from_balance(U256::from(0)));
+    let new_balance = info.balance + U256::from(value);
+    info.balance = new_balance;
+    db.insert_account_info(addr, info);
+}
+
 pub fn add_contract_to_db(db: &mut InMemoryDB, addr: Address, bytecode: Bytes) {
     let account = AccountInfo::new(
         Uint::from(0),

@@ -21,3 +21,8 @@ thiserror.workspace = true
 
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+alloy-trie = { version = "0.9.1", features = ["ethereum"] }
+alloy-rlp = "0.3.12"
+nybbles = "0.4.5"
