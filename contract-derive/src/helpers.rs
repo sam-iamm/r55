@@ -214,9 +214,23 @@ fn generate_method_impl(
                 #method_selector.to_be_bytes()[3],
             ]);
         }
-    } else {
+    } else if arg_names.len() == 1 {
+        // Single-argument: use abi_encode() (equivalent to abi.encode(arg))
         quote! {
             let mut args_calldata = (#(#arg_names),*).abi_encode();
+            let mut complete_calldata = Vec::with_capacity(4 + args_calldata.len());
+            complete_calldata.extend_from_slice(&[
+                #method_selector.to_be_bytes()[0],
+                #method_selector.to_be_bytes()[1],
+                #method_selector.to_be_bytes()[2],
+                #method_selector.to_be_bytes()[3],
+            ]);
+            complete_calldata.append(&mut args_calldata);
+        }
+    } else {
+        // Multi-argument: encode as standard Solidity params (abi.encode(a,b,...))
+        quote! {
+            let mut args_calldata = (#(#arg_names),*).abi_encode_params();
             let mut complete_calldata = Vec::with_capacity(4 + args_calldata.len());
             complete_calldata.extend_from_slice(&[
                 #method_selector.to_be_bytes()[0],
