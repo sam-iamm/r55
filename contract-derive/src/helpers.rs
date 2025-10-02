@@ -254,7 +254,7 @@ fn generate_method_impl(
         )
     };
 
-    // Generate different implementations based on return type
+    // Generate implementations handling Result<Bytes, Bytes> from call_contract.
     match extract_wrapper_types(&method.return_type) {
         // If `Result<T, E>` handle each individual type
         WrapperType::Result(ok_type, err_type) => quote! {
@@ -271,9 +271,14 @@ fn generate_method_impl(
                     None
                 );
 
-                match <#ok_type>::abi_decode(&result) {
-                    Ok(decoded) => Ok(decoded),
-                    Err(_) => Err(<#err_type>::abi_decode(&result, true))
+                match result {
+                    // Call succeeded - decode return data
+                    Ok(bytes) => match <#ok_type>::abi_decode(&bytes) {
+                        Ok(decoded) => Ok(decoded),
+                        Err(_) => Err(<#err_type>::abi_decode(&bytes, true))
+                    },
+                    // Call reverted - return error (no auto-revert, user handles Result)
+                    Err(revert_data) => Err(<#err_type>::abi_decode(&revert_data, true))
                 }
             }
         },
@@ -293,9 +298,16 @@ fn generate_method_impl(
                         None
                     );
 
-                    match <#return_ty>::abi_decode(&result) {
-                        Ok(decoded) => Some(decoded),
-                        Err(_) => None
+                    match result {
+                        // Call succeeded - decode and return
+                        Ok(bytes) => match <#return_ty>::abi_decode(&bytes) {
+                            Ok(decoded) => Some(decoded),
+                            Err(_) => None
+                        },
+                        // Call reverted - auto-propagate (if A→B reverts, A reverts)
+                        Err(revert_data) => {
+                            eth_riscv_runtime::revert_with_error(&revert_data);
+                        }
                     }
                 }
             }
@@ -320,9 +332,16 @@ fn generate_method_impl(
                         None
                     );
 
-                    match <#return_ty>::abi_decode(&result) {
-                        Ok(decoded) => Some(decoded),
-                        Err(_) => None
+                    match result {
+                        // Call succeeded - decode and return
+                        Ok(bytes) => match <#return_ty>::abi_decode(&bytes) {
+                            Ok(decoded) => Some(decoded),
+                            Err(_) => None
+                        },
+                        // Call reverted - auto-propagate
+                        Err(revert_data) => {
+                            eth_riscv_runtime::revert_with_error(&revert_data);
+                        }
                     }
                 }
             }

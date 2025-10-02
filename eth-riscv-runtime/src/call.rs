@@ -69,16 +69,24 @@ pub trait Contract {
     fn call_with_data(&mut self, calldata: &[u8]);
 }
 
+/// Call contract and return Result based on success flag in a0 register.
+/// - Ok(Bytes): call succeeded
+/// - Err(Bytes): call reverted (enables automatic revert propagation)
 pub fn call_contract(
     addr: Address,
     value: u64,
     data: &[u8],
     ret_size: Option<u64>,
-) -> Bytes {
-    // Perform the call without writing return data into (REVM) memory
+) -> Result<Bytes, Bytes> {
     call(addr, value, data.as_ptr() as u64, data.len() as u64);
-    // Load call output to memory
-    handle_call_output(ret_size)
+    
+    // Read success from a0 immediately (written by EVM in return_result)
+    // Avoids race condition with other syscalls that might clobber a0
+    let success: u64;
+    unsafe { asm!("mv {out}, a0", out = lateout(reg) success); }
+    
+    let out = handle_call_output(ret_size);
+    if success == 1 { Ok(out) } else { Err(out) }
 }
 
 pub fn call(addr: Address, value: u64, data_offset: u64, data_size: u64) {
@@ -94,11 +102,15 @@ pub fn call(addr: Address, value: u64, data_offset: u64, data_size: u64) {
     }
 }
 
-pub fn staticcall_contract(addr: Address, value: u64, data: &[u8], ret_size: Option<u64>) -> Bytes {
-    // Perform the staticcall without writing return data into (REVM) memory
+/// Staticcall contract (read-only). Same behavior as call_contract.
+pub fn staticcall_contract(addr: Address, value: u64, data: &[u8], ret_size: Option<u64>) -> Result<Bytes, Bytes> {
     staticcall(addr, value, data.as_ptr() as u64, data.len() as u64);
-    // Load call output to memory
-    handle_call_output(ret_size)
+    
+    let success: u64;
+    unsafe { asm!("mv {out}, a0", out = lateout(reg) success); }
+    
+    let out = handle_call_output(ret_size);
+    if success == 1 { Ok(out) } else { Err(out) }
 }
 
 fn handle_call_output(ret_size: Option<u64>) -> Bytes {
