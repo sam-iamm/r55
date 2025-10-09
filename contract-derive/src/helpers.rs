@@ -255,6 +255,14 @@ fn generate_method_impl(
     };
 
     // Generate implementations handling Result<Bytes, Bytes> from call_contract.
+    // The `result` variable is the direct output of `call_contract`, which returns `Ok` or `Err`
+    // based on the success flag read from the a0 register.
+    //
+    // The generated error handling depends on the function's return type. This provides a
+    // choice between manual error handling and automatic revert propagation (like Solidity).
+    // - `Result<T, E>`: Decodes and returns the `Err`, letting the developer handle the failure.
+    // - `Option<T>` or default: Automatically reverts the transaction on failure.
+    // Reference: https://github.com/sam-iamm/r55/pull/9
     match extract_wrapper_types(&method.return_type) {
         // If `Result<T, E>` handle each individual type
         WrapperType::Result(ok_type, err_type) => quote! {
