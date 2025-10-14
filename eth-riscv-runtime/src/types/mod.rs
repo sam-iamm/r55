@@ -14,6 +14,17 @@ pub use mapping::Mapping;
 mod slot;
 pub use slot::Slot;
 
+mod dynamic_slot;
+pub use dynamic_slot::DynamicSlot;
+
+/// Dynamic storage semantics (v1):
+/// - Each dynamic field is anchored at a unique base slot `B` (macro-assigned).
+/// - The length (in bytes) is stored at `B`.
+/// - Payload words are stored at `keccak256(B || i_be)` per index `i` (0-based).
+/// - Reads honor the stored length and ignore surplus words.
+/// - For mappings, the base `B` is `keccak256(key || id)`; dynamic payload derives from that base,
+///   ensuring namespaces are disjoint per (contract, field, key, index).
+
 ///  STORAGE TYPES:
 ///  > Must implement the following traits:
 ///     - `StorageLayout`: Allows the `storage` macro to allocate a storage slot.
