@@ -15,15 +15,12 @@ mod slot;
 pub use slot::Slot;
 
 mod dynamic_slot;
-pub use dynamic_slot::DynamicSlot;
+pub use dynamic_slot::{DynamicSlot, DynamicValue};
 
-/// Dynamic storage semantics (v1):
-/// - Each dynamic field is anchored at a unique base slot `B` (macro-assigned).
-/// - The length (in bytes) is stored at `B`.
-/// - Payload words are stored at `keccak256(B || i_be)` per index `i` (0-based), where `i_be` is the u64 index encoded as big-endian (8 bytes).
-/// - Reads honor the stored length and ignore surplus words.
-/// - For mappings, the base `B` is `keccak256(key || id)`; dynamic payload derives from that base,
-///   ensuring namespaces are disjoint per (contract, field, key, index).
+/// Dynamic storage (v1):
+/// - Base slot `B` stores byte length; payload word `i` at `keccak256(B || i_be)`, with `i_be` a big-endian u64.
+/// - Under mappings, `B = keccak256(key || id)`.
+/// - Storage layout is internal; ABI remains `SolValue`.
 
 ///  STORAGE TYPES:
 ///  > Must implement the following traits:
