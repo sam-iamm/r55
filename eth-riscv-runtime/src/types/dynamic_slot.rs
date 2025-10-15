@@ -10,6 +10,8 @@ use alloy_core::primitives::Bytes;
 /// Generic dynamic storage slot that anchors a variable-length value at a base slot
 /// and stores the payload across derived slots computed as `keccak256(base || i_be)`.
 ///
+/// Where `i_be` is the u64 index encoded as big-endian (8 bytes).
+///
 /// Safety:
 /// - Length is bounded to prevent excessive allocations.
 /// - Reads honor the stored length and ignore surplus words.
@@ -40,7 +42,10 @@ impl DynamicValue for alloc::string::String {
     }
 
     fn from_storage_bytes(b: Vec<u8>) -> Self {
-        alloc::string::String::from_utf8(b).unwrap_or_default()
+        match alloc::string::String::from_utf8(b) {
+            Ok(s) => s,
+            Err(_) => revert(),
+        }
     }
 }
 
@@ -81,14 +86,14 @@ where
         // number of 32-byte words to read
         let words = (len + 31) / 32;
         let mut out = Vec::with_capacity(words * 32);
+        let base_bytes: [u8; 32] = base.to_be_bytes();
 
         for i in 0..(words as u64) {
             // key = keccak256(base || i_be)
-            let base_bytes: [u8; 32] = base.to_be_bytes();
-            let idx_bytes = i.to_be_bytes();
+            let index_be_8 = i.to_be_bytes();
             let mut buf = Vec::with_capacity(32 + 8);
             buf.extend_from_slice(&base_bytes);
-            buf.extend_from_slice(&idx_bytes);
+            buf.extend_from_slice(&index_be_8);
             let key = keccak256(buf.as_ptr() as u64, buf.len() as u64);
             let word: [u8; 32] = sload(key).to_be_bytes();
             out.extend_from_slice(&word);
@@ -99,7 +104,7 @@ where
     }
 
     fn __write(base: U256, value: Self::Value) {
-        let mut data = T::to_storage_bytes(&value);
+        let data = T::to_storage_bytes(&value);
         if data.len() > MAX_DYNAMIC_BYTES {
             revert();
         }
@@ -115,17 +120,17 @@ where
         // write 32-byte chunks, padding final chunk with zeros
         let mut offset = 0usize;
         let mut index: u64 = 0;
+        let base_bytes: [u8; 32] = base.to_be_bytes();
         while offset < data.len() {
             let remaining = data.len() - offset;
             let take = core::cmp::min(32, remaining);
             let mut chunk = [0u8; 32];
             chunk[..take].copy_from_slice(&data[offset..offset + take]);
             // key = keccak256(base || index_be)
-            let base_bytes: [u8; 32] = base.to_be_bytes();
-            let idx_bytes = index.to_be_bytes();
+            let index_be_8 = index.to_be_bytes();
             let mut buf = Vec::with_capacity(32 + 8);
             buf.extend_from_slice(&base_bytes);
-            buf.extend_from_slice(&idx_bytes);
+            buf.extend_from_slice(&index_be_8);
             let key = keccak256(buf.as_ptr() as u64, buf.len() as u64);
             sstore(key, U256::from_be_bytes(chunk));
             offset += take;

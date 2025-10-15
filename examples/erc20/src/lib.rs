@@ -12,17 +12,17 @@
 //! - Custom error types for clear revert reasons
 //! - Event emission for all state changes
 //!
-//! ## Storage Optimization
-//! - Uses `FixedBytes<32>` for name/symbol (efficient on-chain storage)
+//! ## Storage
+//! - Uses `DynamicSlot<String>` for name/symbol
+//! - Slot-based storage for all fixed-size values
 //! - Nested mappings for allowances
-//! - Slot-based storage for all state variables
 
 #![no_std]
 #![no_main]
 
 use core::default::Default;
 
-use contract_derive::{contract, payable, storage, Event, Error};
+use contract_derive::{contract, storage, Event, Error};
 use eth_riscv_runtime::types::*;
 
 use alloy_core::primitives::{Address, U256};
@@ -94,8 +94,8 @@ pub enum ERC20Error {
 
 /// ERC20 token contract with ownership controls
 /// 
-/// Storage layout uses Slot-based persistence for all state variables.
-/// Dynamic strings for name/symbol are stored via StringSlot with hashed multi-slot backing.
+/// Storage layout uses Slot-based persistence for fixed-size values.
+/// Dynamic strings for name/symbol are stored via DynamicSlot<String>.
 #[storage]
 pub struct ERC20 {
     /// Total token supply across all holders
@@ -164,7 +164,6 @@ impl ERC20 {
     /// # Returns
     /// * `Ok(true)` on success
     /// * `Err(ERC20Error)` on validation failure
-    #[payable]
     pub fn mint(&mut self, to: Address, amount: U256) -> Result<bool, ERC20Error> {
         // Access control: only owner can mint
         if msg_sender() != self.owner.read() { return Err(ERC20Error::OnlyOwner) }; 
