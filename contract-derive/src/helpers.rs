@@ -204,6 +204,15 @@ fn generate_method_impl(
 
     let (arg_names, arg_types) = get_arg_props_skip_first(method);
 
+    // ABI encoding policy for calldata construction:
+    // - 0 args: write the 4-byte selector only.
+    // - 1 arg: use `abi_encode()` which encodes a single value, matching Solidity `abi.encode(arg)`.
+    // - >=2 args: use `abi_encode_params()` which encodes multiple top-level params, matching
+    //   Solidity `abi.encode(a,b,...)`. This matters when any nested value is dynamic (e.g. string,
+    //   bytes) because encoding a single tuple vs. multiple params differs in head/tail layout.
+    //
+    // Note: Whether a Rust type can be encoded is governed by `alloy_sol_types::SolValue` impls.
+    // Selector mapping in `rust_type_to_sol_type` does not guarantee encoder support at call sites.
     let calldata = if arg_names.is_empty() {
         quote! {
             let mut complete_calldata = Vec::with_capacity(4);
@@ -454,6 +463,9 @@ pub fn generate_fn_selector(
 }
 
 // Helper function to convert rust types to their solidity equivalent
+// NOTE: This mapping is used for selector generation only (string signatures -> keccak4).
+// Encoder/decoder support is governed by `alloy_sol_types::SolValue` impls at call sites; adding
+// a type here does not imply that `abi_encode`/`abi_encode_params` is available for that Rust type.
 // TODO: make sure that the impl is robust, so far only tested with "simple types"
 pub fn rust_type_to_sol_type(ty: &Type) -> Result<DynSolType, &'static str> {
     match ty {
@@ -470,6 +482,18 @@ pub fn rust_type_to_sol_type(ty: &Type) -> Result<DynSolType, &'static str> {
                 "bool" | "Bool" => Ok(DynSolType::Bool),
                 "String" | "str" => Ok(DynSolType::String),
                 "Bytes" => Ok(DynSolType::Bytes),
+                // Primitive unsigned integers
+                "u8" => Ok(DynSolType::Uint(8)),
+                "u16" => Ok(DynSolType::Uint(16)),
+                "u32" => Ok(DynSolType::Uint(32)),
+                "u64" => Ok(DynSolType::Uint(64)),
+                "u128" => Ok(DynSolType::Uint(128)),
+                // Primitive signed integers
+                "i8" => Ok(DynSolType::Int(8)),
+                "i16" => Ok(DynSolType::Int(16)),
+                "i32" => Ok(DynSolType::Int(32)),
+                "i64" => Ok(DynSolType::Int(64)),
+                "i128" => Ok(DynSolType::Int(128)),
                 // Fixed-size bytes
                 b if b.starts_with('B') => {
                     let size: usize = b
@@ -713,6 +737,20 @@ mod tests {
         // Invalid cases
         assert!(rust_type_to_sol_type(&parse_quote!(B0)).is_err());
         assert!(rust_type_to_sol_type(&parse_quote!(B33)).is_err());
+    }
+
+    #[test]
+    fn test_rust_to_sol_lower_primitives() {
+        assert_eq!(rust_type_to_sol_type(&parse_quote!(u8)).unwrap(), DynSolType::Uint(8));
+        assert_eq!(rust_type_to_sol_type(&parse_quote!(u16)).unwrap(), DynSolType::Uint(16));
+        assert_eq!(rust_type_to_sol_type(&parse_quote!(u32)).unwrap(), DynSolType::Uint(32));
+        assert_eq!(rust_type_to_sol_type(&parse_quote!(u64)).unwrap(), DynSolType::Uint(64));
+        assert_eq!(rust_type_to_sol_type(&parse_quote!(u128)).unwrap(), DynSolType::Uint(128));
+        assert_eq!(rust_type_to_sol_type(&parse_quote!(i8)).unwrap(), DynSolType::Int(8));
+        assert_eq!(rust_type_to_sol_type(&parse_quote!(i16)).unwrap(), DynSolType::Int(16));
+        assert_eq!(rust_type_to_sol_type(&parse_quote!(i32)).unwrap(), DynSolType::Int(32));
+        assert_eq!(rust_type_to_sol_type(&parse_quote!(i64)).unwrap(), DynSolType::Int(64));
+        assert_eq!(rust_type_to_sol_type(&parse_quote!(i128)).unwrap(), DynSolType::Int(128));
     }
 
     #[test]
