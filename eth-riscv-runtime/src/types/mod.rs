@@ -14,6 +14,14 @@ pub use mapping::Mapping;
 mod slot;
 pub use slot::Slot;
 
+mod dynamic_slot;
+pub use dynamic_slot::{DynamicSlot, DynamicValue};
+
+/// Dynamic storage (v1):
+/// - Base slot `B` stores byte length; payload word `i` at `keccak256(B || i_be)`, with `i_be` a big-endian u64.
+/// - Under mappings, `B = keccak256(key || id)`.
+/// - Storage layout is internal; ABI remains `SolValue`.
+
 ///  STORAGE TYPES:
 ///  > Must implement the following traits:
 ///     - `StorageLayout`: Allows the `storage` macro to allocate a storage slot.
