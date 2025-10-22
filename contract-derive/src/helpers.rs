@@ -139,53 +139,52 @@ where
         .map(|method| generate_method_impl(method, interface_style, false));
 
     quote! {
-        use core::marker::PhantomData;
-        pub struct #interface_name<C: CallCtx> {
-            address: Address,
-            _ctx: PhantomData<C>
+        pub struct #interface_name<C: eth_riscv_runtime::CallCtx> {
+            address: alloy_core::primitives::Address,
+            _ctx: core::marker::PhantomData<C>
         }
 
-        impl InitInterface for #interface_name<ReadOnly> {
-            fn new(address: Address) -> InterfaceBuilder<Self> {
-                InterfaceBuilder {
+        impl eth_riscv_runtime::InitInterface for #interface_name<eth_riscv_runtime::ReadOnly> {
+            fn new(address: alloy_core::primitives::Address) -> eth_riscv_runtime::InterfaceBuilder<Self> {
+                eth_riscv_runtime::InterfaceBuilder {
                     address,
-                    _phantom: PhantomData
+                    _phantom: core::marker::PhantomData
                 }
             }
         }
 
         // Implement conversion between interface types
-        impl<C: CallCtx> IntoInterface<#interface_name<C>> for #interface_name<ReadOnly> {
+        impl<C: eth_riscv_runtime::CallCtx> eth_riscv_runtime::IntoInterface<#interface_name<C>> for #interface_name<eth_riscv_runtime::ReadOnly> {
             fn into_interface(self) -> #interface_name<C> {
                 #interface_name {
                     address: self.address,
-                    _ctx: PhantomData
+                    _ctx: core::marker::PhantomData
                 }
             }
         }
 
-        impl<C: CallCtx> FromBuilder for #interface_name<C> {
+        impl<C: eth_riscv_runtime::CallCtx> eth_riscv_runtime::FromBuilder for #interface_name<C> {
             type Context = C;
 
-            fn from_builder(builder: InterfaceBuilder<Self>) -> Self {
+            fn from_builder(builder: eth_riscv_runtime::InterfaceBuilder<Self>) -> Self {
                 Self {
                     address: builder.address,
-                    _ctx: PhantomData
+                    _ctx: core::marker::PhantomData
                 }
             }
         }
 
-        impl <C: CallCtx> #interface_name<C> {
-            pub fn address(&self) -> Address {
+        impl <C: eth_riscv_runtime::CallCtx> #interface_name<C> {
+            pub fn address(&self) -> alloy_core::primitives::Address {
                 self.address
             }
         }
 
-        impl<C: StaticCtx> #interface_name<C> {
+        impl<C: eth_riscv_runtime::StaticCtx> #interface_name<C> {
             #(#immut_method_impls)*
         }
 
-        impl<C: MutableCtx> #interface_name<C> {
+        impl<C: eth_riscv_runtime::MutableCtx> #interface_name<C> {
             #(#mut_method_impls)*
         }
     }
