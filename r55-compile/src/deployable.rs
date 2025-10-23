@@ -16,10 +16,11 @@ pub fn generate_deployable(contract: &ContractWithDeps) -> eyre::Result<()> {
     content.push_str("use eth_riscv_runtime::{create::Deployable, InitInterface, ReadOnly};\n");
     content.push_str("use core::include_bytes;\n\n");
 
-    // Add imports for each dependency
+    // Add imports for each dependency (convert package name to valid Rust crate path)
     for dep in &contract.deps {
         let interface_name = format!("I{}", dep.name.ident);
-        content.push_str(&format!("use {}::{};\n", dep.name.package, interface_name));
+        let rust_crate = dep.name.package.replace('-', "_");
+        content.push_str(&format!("use {}::{};\n", rust_crate, interface_name));
     }
     content.push('\n');
 
