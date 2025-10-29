@@ -603,6 +603,19 @@ fn to_camel_case(s: String) -> String {
 }
 
 // Helper function to generate the deployment code
+//
+// ABI decoding policy for constructor args (Solidity parity):
+// - 0 args: call `new()`
+// - 1 arg: decode single value via `<T>::abi_decode(msg_data)`
+// - >=2 args: decode parameter list via
+//   `<(T1,...,Tn)>::abi_decode_params_validate(msg_data)`
+//
+// Notes:
+// - Encode path (runtime `with_ctx`) uses params-encoding for constructors
+//   (`abi.encode(a,b,...)`).
+// - Single-arg constructors: params-encoding a 1‑tuple is equivalent to
+//   decoding a single value; pass `(arg,)` at encode time to preserve parity
+//   with dynamic types (string/bytes).
 pub fn generate_deployment_code(
     struct_name: &Ident,
     constructor: Option<&ImplItemMethod>,
@@ -612,15 +625,38 @@ pub fn generate_deployment_code(
         Some(method) => {
             let method_info = MethodInfo::from(method);
             let (arg_names, arg_types) = get_arg_props_all(&method_info);
+
+            let decode_and_init = match arg_types.len() {
+                0 => {
+                    quote! {
+                        #struct_name::new();
+                    }
+                }
+                1 => {
+                    let ty0 = arg_types[0];
+                    let name0 = &arg_names[0];
+                    quote! {
+                        // Get encoded constructor args
+                        let calldata = eth_riscv_runtime::msg_data();
+                        let #name0 = <#ty0>::abi_decode(&calldata)
+                            .expect("Failed to decode constructor args");
+                        #struct_name::new(#name0);
+                    }
+                }
+                _ => {
+                    quote! {
+                        // Get encoded constructor args
+                        let calldata = eth_riscv_runtime::msg_data();
+                        let (#(#arg_names),*) = <(#(#arg_types),*)>::abi_decode_params_validate(&calldata)
+                            .expect("Failed to decode constructor args");
+                        #struct_name::new(#(#arg_names),*);
+                    }
+                }
+            };
+
             quote! {
                 impl #struct_name { #method }
-
-                // Get encoded constructor args
-                let calldata = eth_riscv_runtime::msg_data();
-
-                let (#(#arg_names),*) = <(#(#arg_types),*)>::abi_decode(&calldata)
-                    .expect("Failed to decode constructor args");
-                #struct_name::new(#(#arg_names),*);
+                #decode_and_init
             }
         }
         None => quote! {
@@ -997,5 +1033,43 @@ mod tests {
                 signature
             );
         }
+    }
+
+    #[test]
+    fn test_constructor_params_decode_roundtrip_dynamic() {
+        use alloy_sol_types::SolValue;
+        use std::string::String;
+
+        let name = String::from("Test Token");
+        let symbol = String::from("TEST");
+        let decimals: u16 = 18;
+
+        // Encode as Solidity-style params (not single tuple)
+        let encoded = <(String, String, u16)>::abi_encode_params(
+            &(name.clone(), symbol.clone(), decimals),
+        );
+
+        // Decode using params-validate
+        let (d_name, d_symbol, d_decimals) = <(String, String, u16)>::abi_decode_params_validate(&encoded)
+            .expect("decode failed");
+
+        assert_eq!(d_name, name);
+        assert_eq!(d_symbol, symbol);
+        assert_eq!(d_decimals, decimals);
+    }
+
+    #[test]
+    fn test_constructor_single_arg_params_roundtrip_dynamic() {
+        use alloy_sol_types::SolValue;
+        use std::string::String;
+
+        let name = String::from("Only Name");
+
+        // Encode as Solidity-style params for a single argument by passing a 1-tuple
+        let encoded = <(String,)>::abi_encode_params(&(name.clone(),));
+
+        // Decode as a single value
+        let decoded = <String>::abi_decode(&encoded).expect("decode failed");
+        assert_eq!(decoded, name);
     }
 }

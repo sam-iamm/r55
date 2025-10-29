@@ -44,24 +44,30 @@ where
     Args: SolValue + core::convert::From<<<Args as SolValue>::SolType as SolType>::RustType>
 {
 
-    // Return the interface with the appropriate context
+    /// Return the interface with the appropriate context.
+    ///
+    /// Constructor ABI policy:
+    /// - Encodes constructor args using Solidity params-encoding (`abi.encode(a,b,...)`).
+    /// - For single-arg constructors, pass a 1-tuple `(arg,)` so the encoder treats it
+    ///   as a parameter list; this is critical for dynamic types (string/bytes) parity.
     pub fn with_ctx<M, T>(self, ctx: M) -> T 
     where
         M: MethodCtx<Allowed = ReadWrite>, // Constrain to mutable contexts only
         D::Interface: InitInterface,
         T: FromBuilder<Context = M::Allowed>,
-        D::Interface: crate::IntoInterface<T>
+        D::Interface: crate::IntoInterface<T>,
+        for<'a> <<Args as SolValue>::SolType as SolType>::Token<'a>: alloy_sol_types::abi::TokenSeq<'a>
     {
-        let bytecode = D::__runtime();
-        let encoded_args = self.args.abi_encode();
+        let deploy_bin = D::__runtime();
+        let encoded_args = self.args.abi_encode_params();
 
-        // Craft R55 initcode: [0xFF][codesize][bytecode][constructor_args]
-        let codesize = U32::from(bytecode.len());
+        // Craft R55 initcode expected by r55-evm:
+        // [4-byte codesize][deploy_bin (starts with 0xFF)][constructor_args]
+        let codesize = U32::from(deploy_bin.len());
 
         let mut init_code = Vec::new();
-        init_code.push(0xff);
         init_code.extend_from_slice(&Bytes::from(codesize.to_be_bytes_vec()));
-        init_code.extend_from_slice(&bytecode);
+        init_code.extend_from_slice(deploy_bin);
         init_code.extend_from_slice(&encoded_args);
 
         let offset = init_code.as_ptr() as u64;
