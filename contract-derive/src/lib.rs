@@ -238,26 +238,13 @@ pub fn event_derive(input: TokenStream) -> TokenStream {
         .map(|f| &f.ident)
         .collect();
 
-    // Precompute Solidity type strings for fields
-    let field_sol_types: Vec<String> = field_types
-        .iter()
-        .map(|ty| helpers::rust_type_to_sol_type(ty).expect("Unknown type").sol_type_name().into_owned())
-        .collect();
-    // Build upcast expressions per field for encoding
-    let field_upcast_exprs: Vec<proc_macro2::TokenStream> = field_types
-        .iter()
-        .zip(field_names.iter())
-        .map(|(ty, name)| helpers::gen_upcast_expr(quote! { self.#name }, ty))
-        .collect();
+    // No upcasting needed for events; borrow fields to avoid moves during encoding
 
     let expanded = quote! {
         impl #name {
             const NAME: &'static str = stringify!(#name);
             const INDEXED_FIELDS: &'static [&'static str] = &[
                 #(stringify!(#indexed_fields)),*
-            ];
-            const FIELD_TYPES: &'static [&'static str] = &[
-                #(#field_sol_types),*
             ];
 
             pub fn new(#(#field_names: #field_types),*) -> Self {
@@ -284,12 +271,13 @@ pub fn event_derive(input: TokenStream) -> TokenStream {
                     if !first { signature.extend_from_slice(b","); }
                     first = false;
 
-                    signature.extend_from_slice(#field_sol_types.as_bytes());
+                    // Use runtime SolValue type for signature; supports sol! structs/tuples without precompute
+                    signature.extend_from_slice(self.#field_names.sol_type_name().as_bytes());
 
                     let encoded = {
                         use alloy_sol_types::SolValue;
-                        let __enc_val = #field_upcast_exprs;
-                        __enc_val.abi_encode()
+                        // Borrow when encoding to avoid moving non-Copy fields
+                        (&self.#field_names).abi_encode()
                     };
 
                     let field_name = stringify!(#field_names);
