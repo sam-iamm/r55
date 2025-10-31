@@ -223,30 +223,62 @@ fn generate_method_impl(
             ]);
         }
     } else if arg_names.len() == 1 {
-        // Single-argument: use abi_encode() (equivalent to abi.encode(arg))
-        quote! {
-            let mut args_calldata = (#(#arg_names),*).abi_encode();
-            let mut complete_calldata = Vec::with_capacity(4 + args_calldata.len());
-            complete_calldata.extend_from_slice(&[
-                #method_selector.to_be_bytes()[0],
-                #method_selector.to_be_bytes()[1],
-                #method_selector.to_be_bytes()[2],
-                #method_selector.to_be_bytes()[3],
-            ]);
-            complete_calldata.append(&mut args_calldata);
+        // Single-argument: encode, converting u8 -> U256 for ABI compatibility
+        {
+            // Prepare converted arg binding name
+            let enc_ident = format_ident!("__arg{}_enc", 0usize);
+            // Determine if the sole arg is u8
+            let is_u8 = matches!(arg_types[0], syn::Type::Path(ref tp) if tp.path.segments.last().map(|s| s.ident == "u8").unwrap_or(false));
+
+            let enc_let = if is_u8 {
+                let name0 = &arg_names[0];
+                quote! { let #enc_ident = alloy_core::primitives::U256::from(#name0 as u64); }
+            } else {
+                let name0 = &arg_names[0];
+                quote! { let #enc_ident = #name0; }
+            };
+
+            quote! {
+                #enc_let
+                let mut args_calldata = (#enc_ident,).abi_encode();
+                let mut complete_calldata = Vec::with_capacity(4 + args_calldata.len());
+                complete_calldata.extend_from_slice(&[
+                    #method_selector.to_be_bytes()[0],
+                    #method_selector.to_be_bytes()[1],
+                    #method_selector.to_be_bytes()[2],
+                    #method_selector.to_be_bytes()[3],
+                ]);
+                complete_calldata.append(&mut args_calldata);
+            }
         }
     } else {
         // Multi-argument: encode as standard Solidity params (abi.encode(a,b,...))
-        quote! {
-            let mut args_calldata = (#(#arg_names),*).abi_encode_params();
-            let mut complete_calldata = Vec::with_capacity(4 + args_calldata.len());
-            complete_calldata.extend_from_slice(&[
-                #method_selector.to_be_bytes()[0],
-                #method_selector.to_be_bytes()[1],
-                #method_selector.to_be_bytes()[2],
-                #method_selector.to_be_bytes()[3],
-            ]);
-            complete_calldata.append(&mut args_calldata);
+        // Convert any u8 args to U256 prior to encoding to satisfy SolValue bounds
+        {
+            // Build per-arg converted bindings
+            let enc_idents: Vec<_> = (0..arg_names.len()).map(|i| format_ident!("__arg{}_enc", i)).collect();
+            let enc_lets: Vec<_> = arg_names.iter().zip(arg_types.iter()).enumerate().map(|(i, (name, ty))| {
+                let enc_ident = &enc_idents[i];
+                let is_u8 = matches!(ty, syn::Type::Path(ref tp) if tp.path.segments.last().map(|s| s.ident == "u8").unwrap_or(false));
+                if is_u8 {
+                    quote! { let #enc_ident = alloy_core::primitives::U256::from(#name as u64); }
+                } else {
+                    quote! { let #enc_ident = #name; }
+                }
+            }).collect();
+
+            quote! {
+                #(#enc_lets)*
+                let mut args_calldata = (#(#enc_idents),*).abi_encode_params();
+                let mut complete_calldata = Vec::with_capacity(4 + args_calldata.len());
+                complete_calldata.extend_from_slice(&[
+                    #method_selector.to_be_bytes()[0],
+                    #method_selector.to_be_bytes()[1],
+                    #method_selector.to_be_bytes()[2],
+                    #method_selector.to_be_bytes()[3],
+                ]);
+                complete_calldata.append(&mut args_calldata);
+            }
         }
     };
 

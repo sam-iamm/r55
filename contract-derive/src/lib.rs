@@ -300,6 +300,22 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 .expect("Unable to generate fn selector")
         );
         let (arg_names, arg_types) = helpers::get_arg_props_skip_first(&method_info);
+        // For ABI decode: replace u8 params with U256, then cast back to u8 before call
+        let is_u8_flags: Vec<bool> = arg_types.iter().map(|ty| {
+            if let syn::Type::Path(tp) = ty {
+                tp.path.segments.last().map(|s| s.ident == "u8").unwrap_or(false)
+            } else { false }
+        }).collect();
+        let dec_types: Vec<proc_macro2::TokenStream> = arg_types.iter().zip(is_u8_flags.iter())
+            .map(|(ty, is_u8)| if *is_u8 { quote! { alloy_core::primitives::U256 } } else { quote! { #ty } })
+            .collect();
+        let dec_names: Vec<proc_macro2::Ident> = (0..arg_names.len()).map(|i| format_ident!("__arg{}_dec", i)).collect();
+        let cast_binds: Vec<proc_macro2::TokenStream> = arg_names.iter().zip(dec_names.iter()).zip(is_u8_flags.iter())
+            .map(|((name, dec), is_u8)| if *is_u8 {
+                quote! { let #name: u8 = #dec.as_limbs()[0] as u8; }
+            } else {
+                quote! { let #name = #dec; }
+            }).collect();
 
         // Check if there are payable methods
         let checks = if !is_payable(&method) {
@@ -358,7 +374,8 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
         quote! {
             #method_selector => {
-                let (#( #arg_names, )*) = <(#( #arg_types,)*)>::abi_decode_params_validate(&calldata).expect("abi decode failed");
+                let (#( #dec_names, )*) = <(#( #dec_types ,)*)>::abi_decode_params_validate(&calldata).expect("abi decode failed");
+                #(#cast_binds)*
                 #checks
                 #return_handling
             }
