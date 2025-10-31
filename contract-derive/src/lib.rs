@@ -1,6 +1,5 @@
 extern crate proc_macro;
 use alloy_core::primitives::U256;
-use alloy_sol_types::SolValue;
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
@@ -69,26 +68,10 @@ pub fn error_derive(input: TokenStream) -> TokenStream {
                     .enumerate()
                     .map(|(i, f)| {
                         let var_ident = format_ident!("_{}", i);
-                        let is_u8 = if let syn::Type::Path(tp) = &f.ty {
-                            tp.path
-                                .segments
-                                .last()
-                                .map(|s| s.ident == "u8")
-                                .unwrap_or(false)
-                        } else {
-                            false
-                        };
-
-                        if is_u8 {
-                            let enc_ident = format_ident!("__enc_{}", i);
-                            quote! {
-                                let #enc_ident = alloy_core::primitives::U256::from(#var_ident as u64);
-                                res.extend_from_slice(&#enc_ident.abi_encode());
-                            }
-                        } else {
-                            quote! {
-                                res.extend_from_slice(&#var_ident.abi_encode());
-                            }
+                        let enc_expr = helpers::gen_upcast_expr(quote! { #var_ident }, &f.ty);
+                        quote! {
+                            let __enc_val = #enc_expr;
+                            res.extend_from_slice(&__enc_val.abi_encode());
                         }
                     })
                     .collect();
@@ -138,29 +121,11 @@ pub fn error_derive(input: TokenStream) -> TokenStream {
         match &variant.fields {
             Fields::Unit => quote! { selector if selector == #selector_bytes => #name::#variant_name },
             Fields::Unnamed(fields) => {
-                // Decode as tuple, upcasting u8 fields to U256, then cast back to u8
+                // Decode as tuple, upcasting nested u8 fields to U256, then cast back recursively
                 let dec_types: Vec<_> = fields
                     .unnamed
                     .iter()
-                    .map(|f| {
-                        if let syn::Type::Path(tp) = &f.ty {
-                            let is_u8 = tp
-                                .path
-                                .segments
-                                .last()
-                                .map(|s| s.ident == "u8")
-                                .unwrap_or(false);
-                            if is_u8 {
-                                quote! { alloy_core::primitives::U256 }
-                            } else {
-                                let ty = &f.ty;
-                                quote! { #ty }
-                            }
-                        } else {
-                            let ty = &f.ty;
-                            quote! { #ty }
-                        }
-                    })
+                    .map(|f| helpers::upcast_type_tokens(&f.ty))
                     .collect();
                 let dec_names: Vec<_> = (0..fields.unnamed.len())
                     .map(|i| format_ident!("__err_dec_{}", i))
@@ -175,20 +140,8 @@ pub fn error_derive(input: TokenStream) -> TokenStream {
                     .map(|(i, f)| {
                         let dec_n = &dec_names[i];
                         let val_n = &val_names[i];
-                        let is_u8 = if let syn::Type::Path(tp) = &f.ty {
-                            tp.path
-                                .segments
-                                .last()
-                                .map(|s| s.ident == "u8")
-                                .unwrap_or(false)
-                        } else {
-                            false
-                        };
-                        if is_u8 {
-                            quote! { let #val_n: u8 = #dec_n.as_limbs()[0] as u8; }
-                        } else {
-                            quote! { let #val_n = #dec_n; }
-                        }
+                        let down_expr = helpers::gen_downcast_expr(quote! { #dec_n }, &f.ty);
+                        quote! { let #val_n = #down_expr; }
                     })
                     .collect();
 
@@ -285,11 +238,26 @@ pub fn event_derive(input: TokenStream) -> TokenStream {
         .map(|f| &f.ident)
         .collect();
 
+    // Precompute Solidity type strings for fields
+    let field_sol_types: Vec<String> = field_types
+        .iter()
+        .map(|ty| helpers::rust_type_to_sol_type(ty).expect("Unknown type").sol_type_name().into_owned())
+        .collect();
+    // Build upcast expressions per field for encoding
+    let field_upcast_exprs: Vec<proc_macro2::TokenStream> = field_types
+        .iter()
+        .zip(field_names.iter())
+        .map(|(ty, name)| helpers::gen_upcast_expr(quote! { self.#name }, ty))
+        .collect();
+
     let expanded = quote! {
         impl #name {
             const NAME: &'static str = stringify!(#name);
             const INDEXED_FIELDS: &'static [&'static str] = &[
                 #(stringify!(#indexed_fields)),*
+            ];
+            const FIELD_TYPES: &'static [&'static str] = &[
+                #(#field_sol_types),*
             ];
 
             pub fn new(#(#field_names: #field_types),*) -> Self {
@@ -301,7 +269,6 @@ pub fn event_derive(input: TokenStream) -> TokenStream {
 
         impl eth_riscv_runtime::log::Event for #name {
             fn encode_log(&self) -> (alloc::vec::Vec<u8>, alloc::vec::Vec<[u8; 32]>) {
-                use alloy_sol_types::SolValue;
                 use alloy_core::primitives::{keccak256, B256};
                 use alloc::vec::Vec;
 
@@ -317,8 +284,13 @@ pub fn event_derive(input: TokenStream) -> TokenStream {
                     if !first { signature.extend_from_slice(b","); }
                     first = false;
 
-                    signature.extend_from_slice(self.#field_names.sol_type_name().as_bytes());
-                    let encoded = self.#field_names.abi_encode();
+                    signature.extend_from_slice(#field_sol_types.as_bytes());
+
+                    let encoded = {
+                        use alloy_sol_types::SolValue;
+                        let __enc_val = #field_upcast_exprs;
+                        __enc_val.abi_encode()
+                    };
 
                     let field_name = stringify!(#field_names);
                     if Self::INDEXED_FIELDS.contains(&field_name) && topics.len() < 4 {
@@ -381,21 +353,15 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 .expect("Unable to generate fn selector")
         );
         let (arg_names, arg_types) = helpers::get_arg_props_skip_first(&method_info);
-        // For ABI decode: replace u8 params with U256, then cast back to u8 before call
-        let is_u8_flags: Vec<bool> = arg_types.iter().map(|ty| {
-            if let syn::Type::Path(tp) = ty {
-                tp.path.segments.last().map(|s| s.ident == "u8").unwrap_or(false)
-            } else { false }
-        }).collect();
-        let dec_types: Vec<proc_macro2::TokenStream> = arg_types.iter().zip(is_u8_flags.iter())
-            .map(|(ty, is_u8)| if *is_u8 { quote! { alloy_core::primitives::U256 } } else { quote! { #ty } })
+        // For ABI decode: upcast nested u8 params to U256 recursively, then cast back before call
+        let dec_types: Vec<proc_macro2::TokenStream> = arg_types.iter()
+            .map(|ty| helpers::upcast_type_tokens(ty))
             .collect();
         let dec_names: Vec<proc_macro2::Ident> = (0..arg_names.len()).map(|i| format_ident!("__arg{}_dec", i)).collect();
-        let cast_binds: Vec<proc_macro2::TokenStream> = arg_names.iter().zip(dec_names.iter()).zip(is_u8_flags.iter())
-            .map(|((name, dec), is_u8)| if *is_u8 {
-                quote! { let #name: u8 = #dec.as_limbs()[0] as u8; }
-            } else {
-                quote! { let #name = #dec; }
+        let cast_binds: Vec<proc_macro2::TokenStream> = arg_names.iter().zip(dec_names.iter()).zip(arg_types.iter())
+            .map(|((name, dec), ty)| {
+                let down_expr = helpers::gen_downcast_expr(quote! { #dec }, ty);
+                quote! { let #name = #down_expr; }
             }).collect();
 
         // Check if there are payable methods
@@ -417,11 +383,17 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
             }
            ReturnType::Type(_,_) => {
                 match helpers::extract_wrapper_types(&method.sig.output) {
-                    helpers::WrapperType::Result(_,_) => quote! {
+                    helpers::WrapperType::Result(_,_) => {
+                        let ok_enc_block = {
+                            let ok_syn = helpers::extract_result_ok_type_syn(&method.sig.output).expect("ok type");
+                            let enc_expr = helpers::gen_upcast_expr(quote! { success }, ok_syn);
+                            quote! { (#enc_expr).abi_encode() }
+                        };
+                        quote! {
                         let res = self.#method_name(#( #arg_names ),*);
                         match res {
                             Ok(success) => {
-                                let result_bytes = success.abi_encode();
+                                let result_bytes = { use alloy_sol_types::SolValue; #ok_enc_block };
                                 let result_size = result_bytes.len() as u64;
                                 let result_ptr = result_bytes.as_ptr() as u64;
                                 eth_riscv_runtime::return_riscv(result_ptr, result_size);
@@ -430,24 +402,43 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
                                 eth_riscv_runtime::revert_with_error(&err.abi_encode());
                             }
                         }
+                    }
                     },
-                    helpers::WrapperType::Option(_) => quote! {
+                    helpers::WrapperType::Option(_) => {
+                        let opt_enc_block = {
+                            let inner_syn = helpers::extract_option_inner_type_syn(&method.sig.output).expect("inner");
+                            let enc_expr = helpers::gen_upcast_expr(quote! { success }, inner_syn);
+                            quote! { (#enc_expr).abi_encode() }
+                        };
+                        quote! {
                         match self.#method_name(#( #arg_names ),*) {
                             Some(success) => {
-                                let result_bytes = success.abi_encode();
+                                let result_bytes = { use alloy_sol_types::SolValue; #opt_enc_block };
                                 let result_size = result_bytes.len() as u64;
                                 let result_ptr = result_bytes.as_ptr() as u64;
                                 eth_riscv_runtime::return_riscv(result_ptr, result_size);
                             },
                             None => eth_riscv_runtime::revert(),
                         }
+                    }
                     },
-                    helpers::WrapperType::None => quote! {
+                    helpers::WrapperType::None => {
+                        let none_enc_block = {
+                            match &method.sig.output {
+                                syn::ReturnType::Type(_, ty) => {
+                                    let enc_expr = helpers::gen_upcast_expr(quote! { result }, ty);
+                                    quote! { (#enc_expr).abi_encode() }
+                                }
+                                syn::ReturnType::Default => quote! { ().abi_encode() },
+                            }
+                        };
+                        quote! {
                         let result = self.#method_name(#( #arg_names ),*);
-                        let result_bytes = result.abi_encode();
+                        let result_bytes = { use alloy_sol_types::SolValue; #none_enc_block };
                         let result_size = result_bytes.len() as u64;
                         let result_ptr = result_bytes.as_ptr() as u64;
                         eth_riscv_runtime::return_riscv(result_ptr, result_size);
+                    }
                     }
                 }
             }
@@ -465,50 +456,18 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let emit_helper = quote! {
         #[macro_export]
-        macro_rules! get_type_signature {
-            ($arg:expr) => {
-                $arg.sol_type_name().as_bytes()
-            };
-        }
-
-        #[macro_export]
         macro_rules! emit {
             ($event:ident, $($field:expr),*) => {{
-                use alloy_sol_types::SolValue;
-                use alloy_core::primitives::{keccak256, B256, U256, I256};
-                use alloc::vec::Vec;
-
-                let mut signature = alloc::vec![];
-                signature.extend_from_slice($event::NAME.as_bytes());
-                signature.extend_from_slice(b"(");
-
-                let mut first = true;
-                let mut topics = alloc::vec![B256::default()];
-                let mut data = Vec::new();
-
-                $(
-                    if !first { signature.extend_from_slice(b","); }
-                    first = false;
-
-                    signature.extend_from_slice(get_type_signature!($field));
-                    let encoded = $field.abi_encode();
-
-                    let field_ident = stringify!($field);
-                    if $event::INDEXED_FIELDS.contains(&field_ident) && topics.len() < 4 {
-                        topics.push(B256::from_slice(&encoded));
-                    } else {
-                        data.extend_from_slice(&encoded);
-                    }
-                )*
-
-                signature.extend_from_slice(b")");
-                topics[0] = B256::from(keccak256(&signature));
-
+                let _e = $event::new($($field),*);
+                let (data, topics) = _e.encode_log();
                 if !data.is_empty() {
                     eth_riscv_runtime::emit_log(&data, &topics);
                 } else if topics.len() > 1 {
-                    let data = topics.pop().unwrap();
-                    eth_riscv_runtime::emit_log(data.as_ref(), &topics);
+                    let mut t = topics.clone();
+                    let data = t.pop().unwrap();
+                    eth_riscv_runtime::emit_log(data.as_ref(), &t);
+                } else {
+                    eth_riscv_runtime::emit_log(&[], &topics);
                 }
             }};
         }
