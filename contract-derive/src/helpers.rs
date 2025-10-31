@@ -1,5 +1,3 @@
-use std::error::Error;
-
 use alloy_core::primitives::keccak256;
 use alloy_dyn_abi::DynSolType;
 use proc_macro2::TokenStream;
@@ -223,24 +221,13 @@ fn generate_method_impl(
             ]);
         }
     } else if arg_names.len() == 1 {
-        // Single-argument: encode, converting u8 -> U256 for ABI compatibility
+        // Single-argument: use abi_encode() with nested u8→U256 upcasting
         {
-            // Prepare converted arg binding name
-            let enc_ident = format_ident!("__arg{}_enc", 0usize);
-            // Determine if the sole arg is u8
-            let is_u8 = matches!(arg_types[0], syn::Type::Path(ref tp) if tp.path.segments.last().map(|s| s.ident == "u8").unwrap_or(false));
-
-            let enc_let = if is_u8 {
-                let name0 = &arg_names[0];
-                quote! { let #enc_ident = alloy_core::primitives::U256::from(#name0 as u64); }
-            } else {
-                let name0 = &arg_names[0];
-                quote! { let #enc_ident = #name0; }
-            };
-
+            let name0 = &arg_names[0];
+            let ty0 = arg_types[0];
+            let enc_expr = gen_upcast_expr(quote! { #name0 }, ty0);
             quote! {
-                #enc_let
-                let mut args_calldata = (#enc_ident,).abi_encode();
+                let mut args_calldata = (#enc_expr,).abi_encode();
                 let mut complete_calldata = Vec::with_capacity(4 + args_calldata.len());
                 complete_calldata.extend_from_slice(&[
                     #method_selector.to_be_bytes()[0],
@@ -252,24 +239,13 @@ fn generate_method_impl(
             }
         }
     } else {
-        // Multi-argument: encode as standard Solidity params (abi.encode(a,b,...))
-        // Convert any u8 args to U256 prior to encoding to satisfy SolValue bounds
+        // Multi-argument: encode as standard Solidity params (abi.encode(a,b,...)) with nested u8→U256 upcasting
         {
-            // Build per-arg converted bindings
-            let enc_idents: Vec<_> = (0..arg_names.len()).map(|i| format_ident!("__arg{}_enc", i)).collect();
-            let enc_lets: Vec<_> = arg_names.iter().zip(arg_types.iter()).enumerate().map(|(i, (name, ty))| {
-                let enc_ident = &enc_idents[i];
-                let is_u8 = matches!(ty, syn::Type::Path(ref tp) if tp.path.segments.last().map(|s| s.ident == "u8").unwrap_or(false));
-                if is_u8 {
-                    quote! { let #enc_ident = alloy_core::primitives::U256::from(#name as u64); }
-                } else {
-                    quote! { let #enc_ident = #name; }
-                }
-            }).collect();
-
+            let enc_exprs: Vec<_> = arg_names.iter().zip(arg_types.iter())
+                .map(|(name, ty)| gen_upcast_expr(quote! { #name }, ty))
+                .collect();
             quote! {
-                #(#enc_lets)*
-                let mut args_calldata = (#(#enc_idents),*).abi_encode_params();
+                let mut args_calldata = (#( #enc_exprs ),*).abi_encode_params();
                 let mut complete_calldata = Vec::with_capacity(4 + args_calldata.len());
                 complete_calldata.extend_from_slice(&[
                     #method_selector.to_be_bytes()[0],
@@ -305,7 +281,28 @@ fn generate_method_impl(
     // Reference: https://github.com/sam-iamm/r55/pull/9
     match extract_wrapper_types(&method.return_type) {
         // If `Result<T, E>` handle each individual type
-        WrapperType::Result(ok_type, err_type) => quote! {
+        WrapperType::Result(ok_type, err_type) => {
+            let ok_decode_block = {
+                let ok_syn = extract_result_ok_type_syn(&method.return_type).expect("ok type");
+                if type_needs_u8_upcast(ok_syn) {
+                    let up_ty = upcast_type_tokens(ok_syn);
+                    let down_expr = gen_downcast_expr(quote! { __dec_ok }, ok_syn);
+                    quote! {
+                        match <#up_ty>::abi_decode(&bytes) {
+                            Ok(__dec_ok) => Ok(#down_expr),
+                            Err(_) => Err(<#err_type>::abi_decode(&bytes, true))
+                        }
+                    }
+                } else {
+                    quote! {
+                        match <#ok_type>::abi_decode(&bytes) {
+                            Ok(decoded) => Ok(decoded),
+                            Err(_) => Err(<#err_type>::abi_decode(&bytes, true))
+                        }
+                    }
+                }
+            };
+            quote! {
             pub fn #name(#self_param, #(#arg_names: #arg_types),*) -> Result<#ok_type, #err_type>  {
                 use alloy_sol_types::SolValue;
                 use alloc::vec::Vec;
@@ -321,50 +318,34 @@ fn generate_method_impl(
 
                 match result {
                     // Call succeeded - decode return data
-                    Ok(bytes) => match <#ok_type>::abi_decode(&bytes) {
-                        Ok(decoded) => Ok(decoded),
-                        Err(_) => Err(<#err_type>::abi_decode(&bytes, true))
-                    },
+                    Ok(bytes) => { #ok_decode_block },
                     // Call reverted - return error (no auto-revert, user handles Result)
                     Err(revert_data) => Err(<#err_type>::abi_decode(&revert_data, true))
                 }
             }
+        }
         },
         // If `Option<T>` unwrap the type to decode, and wrap it back
         WrapperType::Option(return_ty) => {
-            quote! {
-                pub fn #name(#self_param, #(#arg_names: #arg_types),*) -> Option<#return_ty> {
-                    use alloy_sol_types::SolValue;
-                    use alloc::vec::Vec;
-
-                    #calldata
-
-                    let result = #call_fn(
-                        self.address,
-                        0_u64,
-                        &complete_calldata,
-                        None
-                    );
-
-                    match result {
-                        // Call succeeded - decode and return
-                        Ok(bytes) => match <#return_ty>::abi_decode(&bytes) {
+            let opt_decode_block = {
+                let inner_syn = extract_option_inner_type_syn(&method.return_type).expect("inner type");
+                if type_needs_u8_upcast(inner_syn) {
+                    let up_ty = upcast_type_tokens(inner_syn);
+                    let down_expr = gen_downcast_expr(quote! { __dec_ok }, inner_syn);
+                    quote! {
+                        match <#up_ty>::abi_decode(&bytes) {
+                            Ok(__dec_ok) => Some(#down_expr),
+                            Err(_) => None
+                        }
+                    }
+                } else {
+                    quote! {
+                        match <#return_ty>::abi_decode(&bytes) {
                             Ok(decoded) => Some(decoded),
                             Err(_) => None
-                        },
-                        // Call reverted - auto-propagate (if A→B reverts, A reverts)
-                        Err(revert_data) => {
-                            eth_riscv_runtime::revert_with_error(&revert_data);
                         }
                     }
                 }
-            }
-        }
-        // Otherwise, simply decode the value + wrap it in an `Option` to force error-handling
-        WrapperType::None => {
-            let return_ty = match return_type {
-                ReturnType::Default => quote! { () },
-                ReturnType::Type(_, ty) => quote! { #ty },
             };
             quote! {
                 pub fn #name(#self_param, #(#arg_names: #arg_types),*) -> Option<#return_ty> {
@@ -382,10 +363,65 @@ fn generate_method_impl(
 
                     match result {
                         // Call succeeded - decode and return
-                        Ok(bytes) => match <#return_ty>::abi_decode(&bytes) {
-                            Ok(decoded) => Some(decoded),
-                            Err(_) => None
-                        },
+                        Ok(bytes) => { #opt_decode_block },
+                        // Call reverted - auto-propagate (if A→B reverts, A reverts)
+                        Err(revert_data) => {
+                            eth_riscv_runtime::revert_with_error(&revert_data);
+                        }
+                    }
+                }
+            }
+        }
+        // Otherwise, simply decode the value + wrap it in an `Option` to force error-handling
+        WrapperType::None => {
+            let return_ty = match return_type {
+                ReturnType::Default => quote! { () },
+                ReturnType::Type(_, ty) => quote! { #ty },
+            };
+            let none_decode_block = {
+                let inner_syn_opt: Option<&Type> = match &method.return_type {
+                    ReturnType::Type(_, ty) => Some(ty.as_ref()),
+                    ReturnType::Default => None,
+                };
+                if let Some(inner_syn) = inner_syn_opt {
+                    if type_needs_u8_upcast(inner_syn) {
+                        let up_ty = upcast_type_tokens(inner_syn);
+                        let down_expr = gen_downcast_expr(quote! { __dec_ok }, inner_syn);
+                        quote! {
+                            match <#up_ty>::abi_decode(&bytes) {
+                                Ok(__dec_ok) => Some(#down_expr),
+                                Err(_) => None
+                            }
+                        }
+                    } else {
+                        quote! {
+                            match <#return_ty>::abi_decode(&bytes) {
+                                Ok(decoded) => Some(decoded),
+                                Err(_) => None
+                            }
+                        }
+                    }
+                } else {
+                    quote! { Some(()) }
+                }
+            };
+            quote! {
+                pub fn #name(#self_param, #(#arg_names: #arg_types),*) -> Option<#return_ty> {
+                    use alloy_sol_types::SolValue;
+                    use alloc::vec::Vec;
+
+                    #calldata
+
+                    let result = #call_fn(
+                        self.address,
+                        0_u64,
+                        &complete_calldata,
+                        None
+                    );
+
+                    match result {
+                        // Call succeeded - decode and return
+                        Ok(bytes) => { #none_decode_block },
                         // Call reverted - auto-propagate
                         Err(revert_data) => {
                             eth_riscv_runtime::revert_with_error(&revert_data);
@@ -461,6 +497,228 @@ pub fn extract_wrapper_types(return_type: &ReturnType) -> WrapperType {
             WrapperType::Option(inner_type)
         }
         _ => WrapperType::None,
+    }
+}
+
+// Return true if the success value (direct return, Option<T>, or Result<T, E>) is u8
+pub fn return_success_is_u8(return_type: &ReturnType) -> bool {
+    match return_type {
+        ReturnType::Default => false,
+        ReturnType::Type(_, ty) => match ty.as_ref() {
+            Type::Path(type_path) => {
+                if let Some(last) = type_path.path.segments.last() {
+                    match last.ident.to_string().as_str() {
+                        "Option" => {
+                            if let PathArguments::AngleBracketed(args) = &last.arguments {
+                                if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
+                                    if let Type::Path(p) = inner_ty {
+                                        return p.path.segments.last().map(|s| s.ident == "u8").unwrap_or(false);
+                                    }
+                                }
+                            }
+                            false
+                        }
+                        "Result" => {
+                            if let PathArguments::AngleBracketed(args) = &last.arguments {
+                                let mut iter = args.args.iter();
+                                if let Some(syn::GenericArgument::Type(ok_ty)) = iter.next() {
+                                    if let Type::Path(p) = ok_ty {
+                                        return p.path.segments.last().map(|s| s.ident == "u8").unwrap_or(false);
+                                    }
+                                }
+                            }
+                            false
+                        }
+                        _ => last.ident == "u8",
+                    }
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        },
+    }
+}
+
+// Extract syn type of Result<Ok, Err>'s Ok type
+pub fn extract_result_ok_type_syn(return_type: &ReturnType) -> Option<&Type> {
+    match return_type {
+        ReturnType::Type(_, ty) => match ty.as_ref() {
+            Type::Path(type_path) => type_path.path.segments.last().and_then(|seg| {
+                if seg.ident == "Result" {
+                    if let PathArguments::AngleBracketed(args) = &seg.arguments {
+                        if let Some(syn::GenericArgument::Type(ok_ty)) = args.args.first() {
+                            return Some(ok_ty);
+                        }
+                    }
+                }
+                None
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+// Extract syn type of Option<T>'s T
+pub fn extract_option_inner_type_syn(return_type: &ReturnType) -> Option<&Type> {
+    match return_type {
+        ReturnType::Type(_, ty) => match ty.as_ref() {
+            Type::Path(type_path) => type_path.path.segments.last().and_then(|seg| {
+                if seg.ident == "Option" {
+                    if let PathArguments::AngleBracketed(args) = &seg.arguments {
+                        if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
+                            return Some(inner_ty);
+                        }
+                    }
+                }
+                None
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+// Recursively determine if a type contains any u8 that needs upcasting
+pub fn type_needs_u8_upcast(ty: &Type) -> bool {
+    match ty {
+        Type::Path(tp) => tp
+            .path
+            .segments
+            .last()
+            .map(|s| {
+                if s.ident == "u8" {
+                    true
+                } else if s.ident == "Vec" {
+                    if let PathArguments::AngleBracketed(args) = &s.arguments {
+                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                            type_needs_u8_upcast(inner)
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false),
+        Type::Tuple(t) => t.elems.iter().any(type_needs_u8_upcast),
+        Type::Array(a) => type_needs_u8_upcast(&a.elem),
+        _ => false,
+    }
+}
+
+// Build a type TokenStream where all u8 occurrences are replaced by U256 recursively
+pub fn upcast_type_tokens(ty: &Type) -> TokenStream {
+    match ty {
+        Type::Path(tp) => {
+            let seg = tp.path.segments.last().unwrap();
+            if seg.ident == "u8" {
+                quote! { alloy_core::primitives::U256 }
+            } else if seg.ident == "Vec" {
+                if let PathArguments::AngleBracketed(args) = &seg.arguments {
+                    if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                        let inner_up = upcast_type_tokens(inner);
+                        quote! { alloc::vec::Vec<#inner_up> }
+                    } else {
+                        quote! { #ty }
+                    }
+                } else {
+                    quote! { #ty }
+                }
+            } else {
+                quote! { #ty }
+            }
+        }
+        Type::Tuple(t) => {
+            let elems = t.elems.iter().map(upcast_type_tokens);
+            quote! { ( #( #elems ),* ) }
+        }
+        Type::Array(a) => {
+            let inner = upcast_type_tokens(&a.elem);
+            let len = &a.len;
+            quote! { [#inner; #len] }
+        }
+        _ => quote! { #ty },
+    }
+}
+
+// Generate an expression converting a value to its upcasted form recursively
+pub fn gen_upcast_expr(var: TokenStream, ty: &Type) -> TokenStream {
+    match ty {
+        Type::Path(tp) => {
+            let seg = tp.path.segments.last().unwrap();
+            if seg.ident == "u8" {
+                quote! { alloy_core::primitives::U256::from(#var as u64) }
+            } else if seg.ident == "Vec" {
+                if let PathArguments::AngleBracketed(args) = &seg.arguments {
+                    if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                        let inner_conv = gen_upcast_expr(quote! { __el }, inner);
+                        quote! { #var.into_iter().map(|__el| { #inner_conv }).collect::<alloc::vec::Vec<_>>() }
+                    } else {
+                        quote! { #var }
+                    }
+                } else {
+                    quote! { #var }
+                }
+            } else {
+                quote! { #var }
+            }
+        }
+        Type::Tuple(t) => {
+            let elems = t
+                .elems
+                .iter()
+                .enumerate()
+                .map(|(i, ty_i)| gen_upcast_expr(quote! { #var.#i }, ty_i));
+            quote! { ( #( #elems ),* ) }
+        }
+        Type::Array(a) => {
+            let inner_conv = gen_upcast_expr(quote! { __el }, &a.elem);
+            quote! { core::array::from_fn(|__i| { let __el = #var[__i].clone(); #inner_conv }) }
+        }
+        _ => quote! { #var },
+    }
+}
+
+// Generate an expression converting an upcasted value back to its original type recursively
+pub fn gen_downcast_expr(var: TokenStream, ty: &Type) -> TokenStream {
+    match ty {
+        Type::Path(tp) => {
+            let seg = tp.path.segments.last().unwrap();
+            if seg.ident == "u8" {
+                quote! { (#var.as_limbs()[0] as u8) }
+            } else if seg.ident == "Vec" {
+                if let PathArguments::AngleBracketed(args) = &seg.arguments {
+                    if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                        let inner_conv = gen_downcast_expr(quote! { __el }, inner);
+                        quote! { #var.into_iter().map(|__el| { #inner_conv }).collect::<alloc::vec::Vec<_>>() }
+                    } else {
+                        quote! { #var }
+                    }
+                } else {
+                    quote! { #var }
+                }
+            } else {
+                quote! { #var }
+            }
+        }
+        Type::Tuple(t) => {
+            let elems = t
+                .elems
+                .iter()
+                .enumerate()
+                .map(|(i, ty_i)| gen_downcast_expr(quote! { #var.#i }, ty_i));
+            quote! { ( #( #elems ),* ) }
+        }
+        Type::Array(a) => {
+            let inner_conv = gen_downcast_expr(quote! { __el }, &a.elem);
+            quote! { core::array::from_fn(|__i| { let __el = #var[__i].clone(); #inner_conv }) }
+        }
+        _ => quote! { #var },
     }
 }
 
@@ -658,13 +916,6 @@ pub fn generate_deployment_code(
             let method_info = MethodInfo::from(method);
             let (arg_names, arg_types) = get_arg_props_all(&method_info);
 
-            // Flags for which args are u8
-            let is_u8_flags: Vec<bool> = arg_types.iter().map(|ty| {
-                if let syn::Type::Path(tp) = ty {
-                    tp.path.segments.last().map(|s| s.ident == "u8").unwrap_or(false)
-                } else { false }
-            }).collect();
-
             let decode_and_init = match arg_types.len() {
                 0 => {
                     quote! {
@@ -674,14 +925,16 @@ pub fn generate_deployment_code(
                 1 => {
                     let ty0 = arg_types[0];
                     let name0 = &arg_names[0];
-                    let is_u8 = is_u8_flags[0];
-                    if is_u8 {
+                    let needs = type_needs_u8_upcast(ty0);
+                    let up_ty = upcast_type_tokens(ty0);
+                    let down_expr = gen_downcast_expr(quote! { __dec0 }, ty0);
+                    if needs {
                         quote! {
                             // Get encoded constructor args
                             let calldata = eth_riscv_runtime::msg_data();
-                            let __dec0 = <alloy_core::primitives::U256>::abi_decode(&calldata)
+                            let __dec0 = <#up_ty>::abi_decode(&calldata)
                                 .expect("Failed to decode constructor args");
-                            let #name0: u8 = __dec0.as_limbs()[0] as u8;
+                            let #name0 = #down_expr;
                             #struct_name::new(#name0);
                         }
                     } else {
@@ -696,15 +949,14 @@ pub fn generate_deployment_code(
                 }
                 _ => {
                     // Build decode as tuple of possibly-upcast types
-                    let dec_types: Vec<proc_macro2::TokenStream> = arg_types.iter().zip(is_u8_flags.iter())
-                        .map(|(ty, is_u8)| if *is_u8 { quote! { alloy_core::primitives::U256 } } else { quote! { #ty } })
+                    let dec_types: Vec<proc_macro2::TokenStream> = arg_types.iter()
+                        .map(|ty| upcast_type_tokens(ty))
                         .collect();
                     let dec_names: Vec<proc_macro2::Ident> = (0..arg_names.len()).map(|i| format_ident!("__ctor_arg{}_dec", i)).collect();
-                    let cast_binds: Vec<proc_macro2::TokenStream> = arg_names.iter().zip(dec_names.iter()).zip(is_u8_flags.iter())
-                        .map(|((name, dec), is_u8)| if *is_u8 {
-                            quote! { let #name: u8 = #dec.as_limbs()[0] as u8; }
-                        } else {
-                            quote! { let #name = #dec; }
+                    let cast_binds: Vec<proc_macro2::TokenStream> = arg_names.iter().zip(dec_names.iter()).zip(arg_types.iter())
+                        .map(|((name, dec), ty)| {
+                            let down_expr = gen_downcast_expr(quote! { #dec }, ty);
+                            quote! { let #name = #down_expr; }
                         }).collect();
 
                     quote! {
