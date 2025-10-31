@@ -62,8 +62,37 @@ pub fn error_derive(input: TokenStream) -> TokenStream {
         let data = match &variant.fields {
             Fields::Unit => quote! {},
             Fields::Unnamed(fields) => {
-                let vars = (0..fields.unnamed.len()).map(|i| format_ident!("_{}", i));
-                quote! { #( res.extend_from_slice(&#vars.abi_encode()); )* }
+                let _vars: Vec<_> = (0..fields.unnamed.len()).map(|i| format_ident!("_{}", i)).collect();
+                let enc_stmts: Vec<_> = fields
+                    .unnamed
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| {
+                        let var_ident = format_ident!("_{}", i);
+                        let is_u8 = if let syn::Type::Path(tp) = &f.ty {
+                            tp.path
+                                .segments
+                                .last()
+                                .map(|s| s.ident == "u8")
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        };
+
+                        if is_u8 {
+                            let enc_ident = format_ident!("__enc_{}", i);
+                            quote! {
+                                let #enc_ident = alloy_core::primitives::U256::from(#var_ident as u64);
+                                res.extend_from_slice(&#enc_ident.abi_encode());
+                            }
+                        } else {
+                            quote! {
+                                res.extend_from_slice(&#var_ident.abi_encode());
+                            }
+                        }
+                    })
+                    .collect();
+                quote! { #(#enc_stmts)* }
             }
             Fields::Named(_) => panic!("Named fields are not supported"),
         };
@@ -109,13 +138,65 @@ pub fn error_derive(input: TokenStream) -> TokenStream {
         match &variant.fields {
             Fields::Unit => quote! { selector if selector == #selector_bytes => #name::#variant_name },
             Fields::Unnamed(fields) => {
-                let field_types: Vec<_> = fields.unnamed.iter().map(|f| &f.ty).collect();
-                let indices: Vec<_> = (0..fields.unnamed.len()).collect();
+                // Decode as tuple, upcasting u8 fields to U256, then cast back to u8
+                let dec_types: Vec<_> = fields
+                    .unnamed
+                    .iter()
+                    .map(|f| {
+                        if let syn::Type::Path(tp) = &f.ty {
+                            let is_u8 = tp
+                                .path
+                                .segments
+                                .last()
+                                .map(|s| s.ident == "u8")
+                                .unwrap_or(false);
+                            if is_u8 {
+                                quote! { alloy_core::primitives::U256 }
+                            } else {
+                                let ty = &f.ty;
+                                quote! { #ty }
+                            }
+                        } else {
+                            let ty = &f.ty;
+                            quote! { #ty }
+                        }
+                    })
+                    .collect();
+                let dec_names: Vec<_> = (0..fields.unnamed.len())
+                    .map(|i| format_ident!("__err_dec_{}", i))
+                    .collect();
+                let val_names: Vec<_> = (0..fields.unnamed.len())
+                    .map(|i| format_ident!("__err_val_{}", i))
+                    .collect();
+                let cast_binds: Vec<_> = fields
+                    .unnamed
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| {
+                        let dec_n = &dec_names[i];
+                        let val_n = &val_names[i];
+                        let is_u8 = if let syn::Type::Path(tp) = &f.ty {
+                            tp.path
+                                .segments
+                                .last()
+                                .map(|s| s.ident == "u8")
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        };
+                        if is_u8 {
+                            quote! { let #val_n: u8 = #dec_n.as_limbs()[0] as u8; }
+                        } else {
+                            quote! { let #val_n = #dec_n; }
+                        }
+                    })
+                    .collect();
+
                 quote!{ selector if selector == #selector_bytes => {
-                    let mut values = Vec::new();
-                    #( values.push(<#field_types>::abi_decode(data.unwrap()).expect("Unable to decode")); )*
-                    #name::#variant_name(#(values[#indices]),*)
-                }} 
+                    let (#( #dec_names ),*) = <(#( #dec_types ),*)>::abi_decode(data.unwrap()).expect("Unable to decode");
+                    #(#cast_binds)*
+                    #name::#variant_name(#( #val_names ),*)
+                }}
             },
             Fields::Named(_) => panic!("Named fields are not supported"),
         }

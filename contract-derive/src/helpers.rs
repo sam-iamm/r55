@@ -658,6 +658,13 @@ pub fn generate_deployment_code(
             let method_info = MethodInfo::from(method);
             let (arg_names, arg_types) = get_arg_props_all(&method_info);
 
+            // Flags for which args are u8
+            let is_u8_flags: Vec<bool> = arg_types.iter().map(|ty| {
+                if let syn::Type::Path(tp) = ty {
+                    tp.path.segments.last().map(|s| s.ident == "u8").unwrap_or(false)
+                } else { false }
+            }).collect();
+
             let decode_and_init = match arg_types.len() {
                 0 => {
                     quote! {
@@ -667,20 +674,45 @@ pub fn generate_deployment_code(
                 1 => {
                     let ty0 = arg_types[0];
                     let name0 = &arg_names[0];
-                    quote! {
-                        // Get encoded constructor args
-                        let calldata = eth_riscv_runtime::msg_data();
-                        let #name0 = <#ty0>::abi_decode(&calldata)
-                            .expect("Failed to decode constructor args");
-                        #struct_name::new(#name0);
+                    let is_u8 = is_u8_flags[0];
+                    if is_u8 {
+                        quote! {
+                            // Get encoded constructor args
+                            let calldata = eth_riscv_runtime::msg_data();
+                            let __dec0 = <alloy_core::primitives::U256>::abi_decode(&calldata)
+                                .expect("Failed to decode constructor args");
+                            let #name0: u8 = __dec0.as_limbs()[0] as u8;
+                            #struct_name::new(#name0);
+                        }
+                    } else {
+                        quote! {
+                            // Get encoded constructor args
+                            let calldata = eth_riscv_runtime::msg_data();
+                            let #name0 = <#ty0>::abi_decode(&calldata)
+                                .expect("Failed to decode constructor args");
+                            #struct_name::new(#name0);
+                        }
                     }
                 }
                 _ => {
+                    // Build decode as tuple of possibly-upcast types
+                    let dec_types: Vec<proc_macro2::TokenStream> = arg_types.iter().zip(is_u8_flags.iter())
+                        .map(|(ty, is_u8)| if *is_u8 { quote! { alloy_core::primitives::U256 } } else { quote! { #ty } })
+                        .collect();
+                    let dec_names: Vec<proc_macro2::Ident> = (0..arg_names.len()).map(|i| format_ident!("__ctor_arg{}_dec", i)).collect();
+                    let cast_binds: Vec<proc_macro2::TokenStream> = arg_names.iter().zip(dec_names.iter()).zip(is_u8_flags.iter())
+                        .map(|((name, dec), is_u8)| if *is_u8 {
+                            quote! { let #name: u8 = #dec.as_limbs()[0] as u8; }
+                        } else {
+                            quote! { let #name = #dec; }
+                        }).collect();
+
                     quote! {
                         // Get encoded constructor args
                         let calldata = eth_riscv_runtime::msg_data();
-                        let (#(#arg_names),*) = <(#(#arg_types),*)>::abi_decode_params_validate(&calldata)
+                        let (#( #dec_names ),*) = <(#( #dec_types ),*)>::abi_decode_params_validate(&calldata)
                             .expect("Failed to decode constructor args");
+                        #(#cast_binds)*
                         #struct_name::new(#(#arg_names),*);
                     }
                 }
