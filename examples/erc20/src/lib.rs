@@ -28,10 +28,10 @@
 
 use core::default::Default;
 
-use contract_derive::{contract, storage, Event, Error};
+use contract_derive::{contract, storage, Error, Event};
 use eth_riscv_runtime::types::*;
 
-use alloy_core::primitives::{keccak256 as alloy_keccak256, Address, U256, FixedBytes};
+use alloy_core::primitives::{keccak256 as alloy_keccak256, Address, FixedBytes, U256};
 
 type B32 = FixedBytes<32>;
 
@@ -101,7 +101,7 @@ pub enum ERC20Error {
 // =============================================================================
 
 /// ERC20 token contract with ownership controls
-/// 
+///
 /// Storage layout uses Slot-based persistence for fixed-size values.
 /// Dynamic strings for name/symbol are stored via DynamicSlot<String>.
 #[storage]
@@ -131,15 +131,15 @@ impl ERC20 {
     // -------------------------------------------------------------------------
     // CONSTRUCTOR
     // -------------------------------------------------------------------------
-    
+
     /// Initializes a new ERC20 token with metadata
-    /// 
+    ///
     /// # Arguments
     /// * `owner` - Address that will own the contract and have minting rights
     /// * `name` - Human-readable token name (e.g., "Ethereum")
     /// * `symbol` - Trading symbol (e.g., "ETH")
     /// * `decimals` - Number of decimal places (typically 18)
-    /// 
+    ///
     /// # Returns
     /// Initialized ERC20 contract instance
     pub fn new(owner: Address, name: String, symbol: String, decimals: U256) -> Self {
@@ -159,24 +159,30 @@ impl ERC20 {
     // -------------------------------------------------------------------------
     // STATE-MODIFYING FUNCTIONS
     // -------------------------------------------------------------------------
-    
+
     /// Mints new tokens to a specified address (owner only)
-    /// 
+    ///
     /// Increases recipient balance and total supply.
     /// Emits Transfer event with `from` = Address::ZERO.
-    /// 
+    ///
     /// # Arguments
     /// * `to` - Recipient address
     /// * `amount` - Tokens to mint
-    /// 
+    ///
     /// # Returns
     /// * `Ok(true)` on success
     /// * `Err(ERC20Error)` on validation failure
     pub fn mint(&mut self, to: Address, amount: U256) -> Result<bool, ERC20Error> {
         // Access control: only owner can mint
-        if msg_sender() != self.owner.read() { return Err(ERC20Error::OnlyOwner) }; 
-        if amount == U256::ZERO { return Err(ERC20Error::ZeroAmount) };
-        if to == Address::ZERO { return Err(ERC20Error::ZeroAddress) };
+        if msg_sender() != self.owner.read() {
+            return Err(ERC20Error::OnlyOwner);
+        };
+        if amount == U256::ZERO {
+            return Err(ERC20Error::ZeroAmount);
+        };
+        if to == Address::ZERO {
+            return Err(ERC20Error::ZeroAddress);
+        };
 
         // Update recipient balance
         let to_balance = self.balance_of[to].read();
@@ -184,20 +190,20 @@ impl ERC20 {
 
         // Update total supply
         self.total_supply += amount;
-        
+
         // Emit Transfer event (from = 0x0 for mints)
         log::emit(Transfer::new(Address::ZERO, to, amount));
         Ok(true)
     }
 
     /// Sets spending allowance for a spender
-    /// 
+    ///
     /// Allows `spender` to withdraw up to `amount` tokens via transferFrom().
-    /// 
+    ///
     /// # Arguments
     /// * `spender` - Address authorized to spend
     /// * `amount` - Maximum spendable amount
-    /// 
+    ///
     /// # Returns
     /// * `Ok(true)` on success
     /// * `Err(ERC20Error)` on validation failure
@@ -205,8 +211,12 @@ impl ERC20 {
         let owner = msg_sender();
 
         // Validation checks
-        if spender == Address::ZERO { return Err(ERC20Error::ZeroAddress) };
-        if spender == owner { return Err(ERC20Error::SelfApproval) };
+        if spender == Address::ZERO {
+            return Err(ERC20Error::ZeroAddress);
+        };
+        if spender == owner {
+            return Err(ERC20Error::SelfApproval);
+        };
 
         // Update allowance mapping
         self.allowance_of[owner][spender].write(amount);
@@ -216,11 +226,11 @@ impl ERC20 {
     }
 
     /// Transfers tokens from caller to another address
-    /// 
+    ///
     /// # Arguments
     /// * `to` - Recipient address
     /// * `amount` - Tokens to transfer
-    /// 
+    ///
     /// # Returns
     /// * `Ok(true)` on success
     /// * `Err(ERC20Error)` on validation failure or insufficient balance
@@ -228,16 +238,24 @@ impl ERC20 {
         let from = msg_sender();
 
         // Validation checks
-        if to == Address::ZERO { return Err(ERC20Error::ZeroAddress) };
-        if amount == U256::ZERO { return Err(ERC20Error::ZeroAmount) };
-        if from == to { return Err(ERC20Error::SelfTransfer) };
+        if to == Address::ZERO {
+            return Err(ERC20Error::ZeroAddress);
+        };
+        if amount == U256::ZERO {
+            return Err(ERC20Error::ZeroAmount);
+        };
+        if from == to {
+            return Err(ERC20Error::SelfTransfer);
+        };
 
         // Load current balances
         let from_balance = self.balance_of[from].read();
         let to_balance = self.balance_of[to].read();
 
         // Check sufficient balance
-        if from_balance < amount { return Err(ERC20Error::InsufficientBalance(from_balance)) }
+        if from_balance < amount {
+            return Err(ERC20Error::InsufficientBalance(from_balance));
+        }
 
         // Update balances atomically
         self.balance_of[from].write(from_balance - amount);
@@ -248,37 +266,52 @@ impl ERC20 {
     }
 
     /// Transfers tokens on behalf of another address using allowance
-    /// 
+    ///
     /// Caller must have sufficient allowance from `from` address.
-    /// 
+    ///
     /// # Arguments
     /// * `from` - Token owner (must have approved caller)
     /// * `to` - Recipient address
     /// * `amount` - Tokens to transfer
-    /// 
+    ///
     /// # Returns
     /// * `Ok(true)` on success
     /// * `Err(ERC20Error)` on insufficient allowance or balance
     /// * Update to use camelCase for Solidity selector parity (across all functions)
-    pub fn transferFrom(&mut self, from: Address, to: Address, amount: U256) -> Result<bool, ERC20Error> {
+    pub fn transferFrom(
+        &mut self,
+        from: Address,
+        to: Address,
+        amount: U256,
+    ) -> Result<bool, ERC20Error> {
         let msg_sender = msg_sender();
 
         // Validation checks
-        if to == Address::ZERO { return Err(ERC20Error::ZeroAddress) };
-        if amount == U256::ZERO { return Err(ERC20Error::ZeroAmount) };
-        if from == to { return Err(ERC20Error::SelfTransfer) };
+        if to == Address::ZERO {
+            return Err(ERC20Error::ZeroAddress);
+        };
+        if amount == U256::ZERO {
+            return Err(ERC20Error::ZeroAmount);
+        };
+        if from == to {
+            return Err(ERC20Error::SelfTransfer);
+        };
 
         // Check allowance (caller must be approved by `from`)
         let allowance = self.allowance_of[from][msg_sender].read();
-        if allowance < amount { return Err(ERC20Error::InsufficientAllowance(allowance)) };
+        if allowance < amount {
+            return Err(ERC20Error::InsufficientAllowance(allowance));
+        };
 
         // Check balance
         let from_balance = self.balance_of[from].read();
-        if from_balance < amount { return Err(ERC20Error::InsufficientBalance(from_balance)) };
+        if from_balance < amount {
+            return Err(ERC20Error::InsufficientBalance(from_balance));
+        };
 
         // Update allowance (decrease by amount spent)
         self.allowance_of[from][msg_sender].write(allowance - amount);
-        
+
         // Update balances atomically
         self.balance_of[from].write(from_balance - amount);
         let to_balance = self.balance_of[to].read();
@@ -289,12 +322,12 @@ impl ERC20 {
     }
 
     /// Transfers contract ownership to a new address (owner only)
-    /// 
+    ///
     /// New owner will have minting rights.
-    /// 
+    ///
     /// # Arguments
     /// * `new_owner` - New contract owner
-    /// 
+    ///
     /// # Returns
     /// * `Ok(true)` on success
     /// * `Err(ERC20Error::OnlyOwner)` if caller is not owner
@@ -302,8 +335,12 @@ impl ERC20 {
         let from = msg_sender();
 
         // Access control + validation
-        if from != self.owner.read() { return Err(ERC20Error::OnlyOwner) }; 
-        if from == new_owner { return Err(ERC20Error::SelfTransfer) }; 
+        if from != self.owner.read() {
+            return Err(ERC20Error::OnlyOwner);
+        };
+        if from == new_owner {
+            return Err(ERC20Error::SelfTransfer);
+        };
 
         // Update owner
         self.owner.write(new_owner);
@@ -315,14 +352,16 @@ impl ERC20 {
     // -------------------------------------------------------------------------
     // VIEW FUNCTIONS
     // -------------------------------------------------------------------------
-    
+
     /// Returns the current contract owner address
     pub fn owner(&self) -> Address {
         self.owner.read()
     }
 
     /// CamelCase view: totalSupply() -> uint256 (Solidity selector parity)
-    pub fn totalSupply(&self) -> U256 { self.total_supply.read() }
+    pub fn totalSupply(&self) -> U256 {
+        self.total_supply.read()
+    }
 
     /// CamelCase view: balanceOf(address) -> uint256 (Solidity selector parity)
     pub fn balanceOf(&self, owner: Address) -> U256 {
@@ -342,10 +381,14 @@ impl ERC20 {
     // -------------------------------------------------------------------------
     // METADATA (IERC20Metadata)
     // -------------------------------------------------------------------------
-    
+
     /// Returns token name
-    pub fn name(&self) -> String { self.name.read() }
+    pub fn name(&self) -> String {
+        self.name.read()
+    }
 
     /// Returns token symbol
-    pub fn symbol(&self) -> String { self.symbol.read() }
+    pub fn symbol(&self) -> String {
+        self.symbol.read()
+    }
 }

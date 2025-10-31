@@ -15,8 +15,8 @@
 use alloy_core::primitives::{keccak256 as alloy_keccak256, Address, Bytes, FixedBytes, U256};
 use alloy_sol_types::sol;
 use contract_derive::{contract, storage, Event};
+use eth_riscv_runtime::revert;
 use eth_riscv_runtime::types::*;
-use eth_riscv_runtime::{revert};
 
 extern crate alloc;
 use alloc::string::String;
@@ -147,7 +147,9 @@ impl ERC20Bridge {
     // Constructor
     // ---------------------------------------------------------------------
     pub fn new(signal_service: Address, counterpart: Address, _this_address: Address) -> Self {
-        if signal_service == Address::ZERO || counterpart == Address::ZERO { revert(); }
+        if signal_service == Address::ZERO || counterpart == Address::ZERO {
+            revert();
+        }
         let mut s = ERC20Bridge::default();
         s.signal_service.write(signal_service);
         s.counterpart.write(counterpart);
@@ -199,14 +201,16 @@ impl ERC20Bridge {
     ///   - SolValue trait: https://docs.rs/alloy-sol-types/1.3.1/alloy_sol_types/trait.SolValue.html
     ///   - I256: https://docs.rs/alloy-core/1.3.1/alloy_core/primitives/struct.I256.html
     ///   - U256: https://docs.rs/alloy-core/1.3.1/alloy_core/primitives/struct.U256.html
-    pub fn getTokenDescriptionId(
-        &self,
-        token_desc: (Address, String, String, u8),
-    ) -> B32 {
+    pub fn getTokenDescriptionId(&self, token_desc: (Address, String, String, u8)) -> B32 {
         let prefix = token_description_prefix();
         let (source, name, symbol, decimals) = token_desc;
         // Match Solidity: keccak256(abi.encode(prefix, TokenDescription)) where TokenDescription is a tuple param
-        let td = TokenDescription { sourceToken: source, name, symbol, decimals };
+        let td = TokenDescription {
+            sourceToken: source,
+            name,
+            symbol,
+            decimals,
+        };
         let params = (prefix, td);
         let bytes = alloy_sol_types::SolValue::abi_encode_params(&params);
         B32::from(alloy_keccak256(&bytes))
@@ -219,13 +223,12 @@ impl ERC20Bridge {
     /// For static-only inner tuples, encoding a single tuple vs. multiple params produces identical
     /// bytes. If any dynamic field is ever added here, switch to `abi_encode_params(&(prefix, erc20Deposit))`
     /// to preserve Solidity parity.
-    pub fn getDepositId(
-        &self,
-        erc20_deposit: (U256, Address, Address, Address, U256),
-    ) -> B32 {
+    pub fn getDepositId(&self, erc20_deposit: (U256, Address, Address, Address, U256)) -> B32 {
         let prefix = deposit_prefix();
         let tuple = (prefix, erc20_deposit);
-        B32::from(alloy_keccak256(&alloy_sol_types::SolValue::abi_encode(&tuple)))
+        B32::from(alloy_keccak256(&alloy_sol_types::SolValue::abi_encode(
+            &tuple,
+        )))
     }
 
     // ---------------------------------------------------------------------
@@ -235,8 +238,12 @@ impl ERC20Bridge {
     /// recordTokenDescription(address token) -> bytes32
     pub fn recordTokenDescription(&mut self, token: Address) -> B32 {
         // Parity checks
-        if token == Address::ZERO { revert(); }
-        if self.is_bridged_token[token].read() == U256::from(1u8) { revert(); }
+        if token == Address::ZERO {
+            revert();
+        }
+        if self.is_bridged_token[token].read() == U256::from(1u8) {
+            revert();
+        }
 
         // --- Read token metadata; if all three fail, mirror base revert behavior ---
         // Try/catch parity: each metadata call may fail independently; apply per-field fallbacks
@@ -248,14 +255,24 @@ impl ERC20Bridge {
         // IMPORTANT: Solidity encodes two params `(prefix, tokenDesc)`; use abi_encode_params
         let id = {
             let prefix = token_description_prefix();
-            let td = TokenDescription { sourceToken: token, name: name.clone(), symbol: symbol.clone(), decimals: decimals_u8 };
+            let td = TokenDescription {
+                sourceToken: token,
+                name: name.clone(),
+                symbol: symbol.clone(),
+                decimals: decimals_u8,
+            };
             let params = (prefix, td);
             let bytes = alloy_sol_types::SolValue::abi_encode_params(&params);
             B32::from(alloy_keccak256(&bytes))
         };
 
         // Rebuild TokenDescription to move into event payload
-        let token_desc = TokenDescription { sourceToken: token, name, symbol, decimals: decimals_u8 };
+        let token_desc = TokenDescription {
+            sourceToken: token,
+            name,
+            symbol,
+            decimals: decimals_u8,
+        };
 
         // Signal via SignalService: sendSignal(bytes32) -> bytes32 (slot)
         // Propagate revert on failure to match Solidity behavior
@@ -265,11 +282,16 @@ impl ERC20Bridge {
         calldata.extend_from_slice(id.as_slice());
         match eth_riscv_runtime::call::call_contract(sig_addr, 0, &calldata, Some(32)) {
             Ok(_) => { /* ignore returned slot */ }
-            Err(_) => { revert(); }
+            Err(_) => {
+                revert();
+            }
         }
 
         // Emit TokenDescriptionRecorded(id, tokenDesc)
-        eth_riscv_runtime::log::emit(TokenDescriptionRecorded { id, description: token_desc });
+        eth_riscv_runtime::log::emit(TokenDescriptionRecorded {
+            id,
+            description: token_desc,
+        });
 
         id
     }
@@ -284,18 +306,18 @@ impl ERC20Bridge {
         let (source_token, name, symbol, decimals_u8) = token_desc;
 
         // Compute id = keccak256(abi.encode(TOKEN_DESCRIPTION_SIGNAL_PREFIX, tokenDesc))
-        let id = self.getTokenDescriptionId((
-            source_token,
-            name.clone(),
-            symbol.clone(),
-            decimals_u8,
-        ));
+        let id =
+            self.getTokenDescriptionId((source_token, name.clone(), symbol.clone(), decimals_u8));
 
         // require(!_processed[id])
-        if self.processed[id].read() == U256::from(1u8) { revert(); }
+        if self.processed[id].read() == U256::from(1u8) {
+            revert();
+        }
 
         // require(_counterpartTokens[sourceToken] == address(0))
-        if self.counterpart_token_of[source_token].read() != Address::ZERO { revert(); }
+        if self.counterpart_token_of[source_token].read() != Address::ZERO {
+            revert();
+        }
 
         // signalService.verifySignal(counterpart, id, proof)
         // ABI: verifySignal(address,bytes32,bytes)
@@ -307,7 +329,9 @@ impl ERC20Bridge {
         calldata.extend_from_slice(&alloy_sol_types::SolValue::abi_encode_params(&args));
         match eth_riscv_runtime::call::call_contract(sig_addr, 0, &calldata, None) {
             Ok(_) => {}
-            Err(_) => { revert(); }
+            Err(_) => {
+                revert();
+            }
         }
 
         // Read this_address
@@ -324,7 +348,9 @@ impl ERC20Bridge {
         .with_ctx(&mut *self);
         let deployed = child.address();
 
-        if deployed == Address::ZERO { revert(); }
+        if deployed == Address::ZERO {
+            revert();
+        }
 
         // _counterpartTokens[source] = deployed; _isBridgedTokens[deployed] = true; _processed[id] = true
         self.counterpart_token_of[source_token].write(deployed);
@@ -332,8 +358,17 @@ impl ERC20Bridge {
         self.processed[id].write(U256::from(1u8));
 
         // Emit CounterpartTokenDeployed(id, tokenDesc, deployed)
-        let td = TokenDescription { sourceToken: source_token, name, symbol, decimals: decimals_u8 };
-        eth_riscv_runtime::log::emit(CounterpartTokenDeployed { id, description: td, deployed_token: deployed });
+        let td = TokenDescription {
+            sourceToken: source_token,
+            name,
+            symbol,
+            decimals: decimals_u8,
+        };
+        eth_riscv_runtime::log::emit(CounterpartTokenDeployed {
+            id,
+            description: td,
+            deployed_token: deployed,
+        });
 
         deployed
     }
@@ -355,7 +390,7 @@ impl ERC20Bridge {
                         revert()
                     }
                 }
-                Err(_) => { revert() }
+                Err(_) => revert(),
             }
         } else {
             _local_token
@@ -372,7 +407,8 @@ impl ERC20Bridge {
         let id = self.getDepositId(deposit_tuple);
 
         // Increment nonce (unchecked in Solidity semantics)
-        self.global_deposit_nonce.write(nonce.saturating_add(U256::from(1u8)));
+        self.global_deposit_nonce
+            .write(nonce.saturating_add(U256::from(1u8)));
 
         // IERC20(localToken).safeTransferFrom(msg.sender, address(this), amount)
         let this_address = self.this_address.read();
@@ -384,11 +420,16 @@ impl ERC20Bridge {
             Ok(bytes) => {
                 // SafeERC20 semantics: if return data exists, it must decode to true
                 if !bytes.is_empty() {
-                    let ok = <bool as alloy_sol_types::SolValue>::abi_decode(&bytes).unwrap_or(false);
-                    if !ok { revert(); }
+                    let ok =
+                        <bool as alloy_sol_types::SolValue>::abi_decode(&bytes).unwrap_or(false);
+                    if !ok {
+                        revert();
+                    }
                 }
             }
-            Err(_) => { revert(); }
+            Err(_) => {
+                revert();
+            }
         }
 
         // If bridged, burn on local token
@@ -399,7 +440,9 @@ impl ERC20Bridge {
             burn_calldata.extend_from_slice(&alloy_sol_types::SolValue::abi_encode(&amount));
             match eth_riscv_runtime::call::call_contract(_local_token, 0, &burn_calldata, None) {
                 Ok(_) => {}
-                Err(_) => { revert(); }
+                Err(_) => {
+                    revert();
+                }
             }
         }
 
@@ -410,25 +453,43 @@ impl ERC20Bridge {
         ss_calldata.extend_from_slice(id.as_slice());
         match eth_riscv_runtime::call::call_contract(sig_addr, 0, &ss_calldata, Some(32)) {
             Ok(_) => {}
-            Err(_) => { revert(); }
+            Err(_) => {
+                revert();
+            }
         }
 
         // Emit DepositMade(id, erc20Deposit, localToken)
-        let erc20_deposit = ERC20Deposit { nonce, from, to, sourceToken: source_token, amount };
-        eth_riscv_runtime::log::emit(DepositMade { id, deposit: erc20_deposit, local_token: _local_token });
+        let erc20_deposit = ERC20Deposit {
+            nonce,
+            from,
+            to,
+            sourceToken: source_token,
+            amount,
+        };
+        eth_riscv_runtime::log::emit(DepositMade {
+            id,
+            deposit: erc20_deposit,
+            local_token: _local_token,
+        });
 
         id
     }
 
     /// claimDeposit(ERC20Deposit, bytes proof)
-    pub fn claimDeposit(&mut self, _erc20_deposit: (U256, Address, Address, Address, U256), _proof: Bytes) {
+    pub fn claimDeposit(
+        &mut self,
+        _erc20_deposit: (U256, Address, Address, Address, U256),
+        _proof: Bytes,
+    ) {
         let (nonce, from, to, source_token, amount) = _erc20_deposit;
 
         // Compute id = keccak256(abi.encode(DEPOSIT_SIGNAL_PREFIX, erc20Deposit))
         let id = self.getDepositId((nonce, from, to, source_token, amount));
 
         // require(!processed(id))
-        if self.processed[id].read() == U256::from(1u8) { revert(); }
+        if self.processed[id].read() == U256::from(1u8) {
+            revert();
+        }
 
         // signalService.verifySignal(counterpart, id, proof)
         let counterparty = self.counterpart.read();
@@ -439,7 +500,9 @@ impl ERC20Bridge {
         calldata.extend_from_slice(&alloy_sol_types::SolValue::abi_encode_params(&args));
         match eth_riscv_runtime::call::call_contract(sig_addr, 0, &calldata, None) {
             Ok(_) => {}
-            Err(_) => { revert(); }
+            Err(_) => {
+                revert();
+            }
         }
 
         // Mark processed before effects to match Solidity nonReentrant semantics ordering
@@ -452,10 +515,13 @@ impl ERC20Bridge {
             let mut mint_calldata = Vec::new();
             mint_calldata.extend_from_slice(&function_selector(b"mint(address,uint256)"));
             let mint_args = (to, amount);
-            mint_calldata.extend_from_slice(&alloy_sol_types::SolValue::abi_encode_params(&mint_args));
+            mint_calldata
+                .extend_from_slice(&alloy_sol_types::SolValue::abi_encode_params(&mint_args));
             match eth_riscv_runtime::call::call_contract(counterpart, 0, &mint_calldata, None) {
                 Ok(_) => {}
-                Err(_) => { revert(); }
+                Err(_) => {
+                    revert();
+                }
             }
         } else {
             // Transfer held source tokens from bridge to recipient
@@ -466,17 +532,31 @@ impl ERC20Bridge {
             match eth_riscv_runtime::call::call_contract(source_token, 0, &t_calldata, None) {
                 Ok(bytes) => {
                     if !bytes.is_empty() {
-                        let ok = <bool as alloy_sol_types::SolValue>::abi_decode(&bytes).unwrap_or(false);
-                        if !ok { revert(); }
+                        let ok = <bool as alloy_sol_types::SolValue>::abi_decode(&bytes)
+                            .unwrap_or(false);
+                        if !ok {
+                            revert();
+                        }
                     }
                 }
-                Err(_) => { revert(); }
+                Err(_) => {
+                    revert();
+                }
             }
         }
 
         // Emit DepositClaimed(id, erc20Deposit)
-        let erc20_deposit = ERC20Deposit { nonce, from, to, sourceToken: source_token, amount };
-        eth_riscv_runtime::log::emit(DepositClaimed { id, deposit: erc20_deposit });
+        let erc20_deposit = ERC20Deposit {
+            nonce,
+            from,
+            to,
+            sourceToken: source_token,
+            amount,
+        };
+        eth_riscv_runtime::log::emit(DepositClaimed {
+            id,
+            deposit: erc20_deposit,
+        });
     }
 }
 
@@ -491,7 +571,6 @@ fn token_description_prefix() -> B32 {
 fn deposit_prefix() -> B32 {
     B32::from(alloy_keccak256(b"ERC20_DEPOSIT"))
 }
-
 
 /// Compute a 4-byte function selector from a signature string, e.g. b"name()".
 fn function_selector(signature: &[u8]) -> [u8; 4] {
