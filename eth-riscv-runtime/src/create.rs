@@ -1,5 +1,6 @@
 extern crate alloc;
-use alloy_core::primitives::{Address, Bytes, U32, U256};
+use alloc::string::String;
+use alloy_core::primitives::{Address, Bytes, U32, U256, I256, FixedBytes};
 use alloy_sol_types::{SolType, SolValue};
 use ext_alloc::vec::Vec;
 use core::{arch::asm, marker::PhantomData, u64};
@@ -8,35 +9,38 @@ use eth_riscv_syscalls::Syscall;
 use crate::{FromBuilder, InitInterface, MethodCtx, ReadWrite};
 
 // Minimal, non-invasive ABI upcast helper to mirror contract-derive's u8→U256 handling
-// for constructor argument encoding. Extend as needed.
+// for constructor argument encoding.
+//
+// Encoding semantics:
+// - bytes (dynamic): use `Bytes` (or `&Bytes`).
+// - uint8[] (dynamic): `Vec<u8>` / `&[u8]` → `Vec<U256>` (element-wise upcast).
+// - fixed arrays: `[T; N]` → `[T::Output; N]` via element upcast (e.g., `[u8; N]` → `[U256; N]`).
+// - bytesN (fixed): pass `FixedBytes<N>` to encode as a single 32-byte word.
+// - tuples: supported up to arity 10.
+// - borrowed forms: `&T`, `&str`, `&[T]` supported without forcing ownership.
+// - single-arg constructors: pass as a 1‑tuple `(arg,)` to use params encoding.
 trait AbiUpcast {
     type Output;
     fn upcast(self) -> Self::Output;
+}
+
+macro_rules! impl_identity_upcast {
+    ($($t:ty),+ $(,)?) => {$(
+        impl AbiUpcast for $t { type Output = $t; #[inline] fn upcast(self) -> Self::Output { self } }
+    )+}
 }
 
 impl AbiUpcast for u8 {
     type Output = U256;
     #[inline]
     fn upcast(self) -> Self::Output {
-        U256::from(self as u64)
+        U256::from(self)
     }
 }
 
-// Identity for common primitives
-impl AbiUpcast for U256 { type Output = U256; #[inline] fn upcast(self) -> Self::Output { self } }
-impl AbiUpcast for Address { type Output = Address; #[inline] fn upcast(self) -> Self::Output { self } }
-impl AbiUpcast for Bytes { type Output = Bytes; #[inline] fn upcast(self) -> Self::Output { self } }
-impl AbiUpcast for alloc::string::String { type Output = alloc::string::String; #[inline] fn upcast(self) -> Self::Output { self } }
-impl AbiUpcast for bool { type Output = bool; #[inline] fn upcast(self) -> Self::Output { self } }
-impl AbiUpcast for u16 { type Output = u16; #[inline] fn upcast(self) -> Self::Output { self } }
-impl AbiUpcast for u32 { type Output = u32; #[inline] fn upcast(self) -> Self::Output { self } }
-impl AbiUpcast for u64 { type Output = u64; #[inline] fn upcast(self) -> Self::Output { self } }
-impl AbiUpcast for u128 { type Output = u128; #[inline] fn upcast(self) -> Self::Output { self } }
-impl AbiUpcast for i8 { type Output = i8; #[inline] fn upcast(self) -> Self::Output { self } }
-impl AbiUpcast for i16 { type Output = i16; #[inline] fn upcast(self) -> Self::Output { self } }
-impl AbiUpcast for i32 { type Output = i32; #[inline] fn upcast(self) -> Self::Output { self } }
-impl AbiUpcast for i64 { type Output = i64; #[inline] fn upcast(self) -> Self::Output { self } }
-impl AbiUpcast for i128 { type Output = i128; #[inline] fn upcast(self) -> Self::Output { self } }
+// Identity upcasts
+impl_identity_upcast!(U256, I256, Address, Bytes, String, bool, u16, u32, u64, u128, i8, i16, i32, i64, i128);
+impl<const N: usize> AbiUpcast for FixedBytes<N> { type Output = FixedBytes<N>; #[inline] fn upcast(self) -> Self::Output { self } }
 
 // Containers
 impl<T: AbiUpcast> AbiUpcast for alloc::vec::Vec<T> {
@@ -47,15 +51,45 @@ impl<T: AbiUpcast> AbiUpcast for alloc::vec::Vec<T> {
     }
 }
 
+// Borrowed forms to avoid forcing ownership at call sites
+impl<'a, T> AbiUpcast for &'a T
+where
+    T: AbiUpcast + Clone,
+{
+    type Output = <T as AbiUpcast>::Output;
+    #[inline]
+    fn upcast(self) -> Self::Output { self.clone().upcast() }
+}
+
+impl<'a> AbiUpcast for &'a str {
+    type Output = String;
+    #[inline]
+    fn upcast(self) -> Self::Output { String::from(self) }
+}
+
+impl<'a, T> AbiUpcast for &'a [T]
+where
+    T: AbiUpcast + Clone,
+{
+    type Output = Vec<<T as AbiUpcast>::Output>;
+    #[inline]
+    fn upcast(self) -> Self::Output { self.iter().cloned().map(|v| v.upcast()).collect() }
+}
+
+// Fixed-size arrays: element-wise upcast
 impl<T: AbiUpcast + Clone, const N: usize> AbiUpcast for [T; N] {
     type Output = [<T as AbiUpcast>::Output; N];
     #[inline]
     fn upcast(self) -> Self::Output {
-        core::array::from_fn(|i| self[i].clone().upcast())
+        let arr = self;
+        core::array::from_fn(|i| arr[i].clone().upcast())
     }
 }
 
-// Tuple upcasts (cover common arities used by constructors)
+// Unit tuple for zero-arg constructors
+impl AbiUpcast for () { type Output = (); #[inline] fn upcast(self) -> Self::Output { self } }
+
+// Tuple upcasts (cover common arities used by constructors; limited to 10)
 impl<A: AbiUpcast> AbiUpcast for (A,) {
     type Output = (A::Output,);
     #[inline]
@@ -116,6 +150,7 @@ impl<A: AbiUpcast, B: AbiUpcast, C: AbiUpcast, D: AbiUpcast, E: AbiUpcast, F: Ab
     fn upcast(self) -> Self::Output { (self.0.upcast(), self.1.upcast(), self.2.upcast(), self.3.upcast(), self.4.upcast(), self.5.upcast(), self.6.upcast(), self.7.upcast(), self.8.upcast(), self.9.upcast()) }
 }
 
+
 pub trait Deployable {
     type Interface: InitInterface;
 
@@ -169,7 +204,7 @@ where
         <Args as AbiUpcast>::Output: SolValue,
     {
         let deploy_bin = D::__runtime();
-        // Upcast nested u8s to U256 before ABI params encoding
+        // Upcast nested u8 to U256 and preserve shapes (Vec/tuples/[u8;N]) before ABI params encoding
         let upcast_args = self.args.upcast();
         let encoded_args = upcast_args.abi_encode_params();
 
