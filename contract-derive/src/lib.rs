@@ -247,7 +247,7 @@ pub fn event_derive(input: TokenStream) -> TokenStream {
     let field_upcast_exprs: Vec<proc_macro2::TokenStream> = field_types
         .iter()
         .zip(field_names.iter())
-        .map(|(ty, name)| helpers::gen_upcast_expr(quote! { self.#name }, ty))
+        .map(|(ty, name)| helpers::gen_upcast_expr(quote! { (self.#name).clone() }, ty))
         .collect();
 
     let expanded = quote! {
