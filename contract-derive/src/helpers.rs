@@ -500,46 +500,6 @@ pub fn extract_wrapper_types(return_type: &ReturnType) -> WrapperType {
     }
 }
 
-// Return true if the success value (direct return, Option<T>, or Result<T, E>) is u8
-pub fn return_success_is_u8(return_type: &ReturnType) -> bool {
-    match return_type {
-        ReturnType::Default => false,
-        ReturnType::Type(_, ty) => match ty.as_ref() {
-            Type::Path(type_path) => {
-                if let Some(last) = type_path.path.segments.last() {
-                    match last.ident.to_string().as_str() {
-                        "Option" => {
-                            if let PathArguments::AngleBracketed(args) = &last.arguments {
-                                if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-                                    if let Type::Path(p) = inner_ty {
-                                        return p.path.segments.last().map(|s| s.ident == "u8").unwrap_or(false);
-                                    }
-                                }
-                            }
-                            false
-                        }
-                        "Result" => {
-                            if let PathArguments::AngleBracketed(args) = &last.arguments {
-                                let mut iter = args.args.iter();
-                                if let Some(syn::GenericArgument::Type(ok_ty)) = iter.next() {
-                                    if let Type::Path(p) = ok_ty {
-                                        return p.path.segments.last().map(|s| s.ident == "u8").unwrap_or(false);
-                                    }
-                                }
-                            }
-                            false
-                        }
-                        _ => last.ident == "u8",
-                    }
-                } else {
-                    false
-                }
-            }
-            _ => false,
-        },
-    }
-}
-
 // Extract syn type of Result<Ok, Err>'s Ok type
 pub fn extract_result_ok_type_syn(return_type: &ReturnType) -> Option<&Type> {
     match return_type {
