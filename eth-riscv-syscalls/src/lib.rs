@@ -59,6 +59,7 @@ macro_rules! syscalls {
 // t0: 0x33, opcode for caller, returns an address
 // t0: 0x34, opcode for callvalue, a0: first limb, a1: second limb, a2: third limb, a3: fourth limb, returns 256-bit value
 // t0: 0x3A, opcode for gasprice, returns 256-bit value
+// t0: 0x3B, opcode for extcodesize, a0-a2: address, returns 64-bit size in a0
 // t0: 0x3d, opcode for returndatasize, returns 64-bit value
 // t0: 0x3e, opcode for returndatacopy, a0: memory offset, a1: return data offset, a2: return data size, returns nothing
 // t0: 0x54, opcode for sload, a0: storage key, returns 256-bit value
@@ -81,6 +82,7 @@ syscalls!(
     (0x33, Caller, "caller"),
     (0x34, CallValue, "callvalue"),
     (0x3A, GasPrice, "gasprice"),
+    (0x3B, ExtCodeSize, "extcodesize"),
     (0x3D, ReturnDataSize, "returndatasize"),
     (0x3E, ReturnDataCopy, "returndatacopy"),
     (0x42, Timestamp, "timestamp"),
