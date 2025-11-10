@@ -2,6 +2,7 @@ extern crate proc_macro;
 use alloy_core::primitives::U256;
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
+use std::collections::HashMap;
 use syn::{
     parse_macro_input, Data, DeriveInput, Fields, ImplItem, ImplItemMethod,
     ItemImpl, ItemTrait, ReturnType, TraitItem,
@@ -328,7 +329,8 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     let mut constructor = None;
-    let mut public_methods: Vec<&ImplItemMethod> = Vec::new();
+    // Work with owned methods so we can rename duplicates safely
+    let mut public_methods_owned: Vec<ImplItemMethod> = Vec::new();
 
     // Iterate over the items in the impl block to find pub methods + constructor
     for item in input.items.iter() {
@@ -336,10 +338,23 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
             if method.sig.ident == "new" {
                 constructor = Some(method);
             } else if let syn::Visibility::Public(_) = method.vis {
-                public_methods.push(method);
+                public_methods_owned.push(method.clone());
             }
         }
     }
+
+    // Rename duplicate idents in emitted methods: <base>__overload<n>
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for m in public_methods_owned.iter_mut() {
+        let base = m.sig.ident.to_string();
+        let entry = counts.entry(base.clone()).or_insert(0);
+        if *entry > 0 {
+            let new_ident = format_ident!("{}__overload{}", base, *entry);
+            m.sig.ident = new_ident;
+        }
+        *entry += 1;
+    }
+    let public_methods: Vec<&ImplItemMethod> = public_methods_owned.iter().collect();
 
     let input_methods: Vec<_> = public_methods
         .iter()

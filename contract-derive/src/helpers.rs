@@ -687,10 +687,18 @@ pub fn generate_fn_selector(
     method: &MethodInfo,
     style: Option<InterfaceNamingStyle>,
 ) -> Option<[u8; 4]> {
+    // Normalize Rust ident by stripping a trailing "__overload<digits>" overload suffix, if present.
+    let mut base = method.name.to_string();
+    if let Some(idx) = base.rfind("__overload") {
+        let suffix = &base[(idx + "__overload".len())..];
+        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+            base.truncate(idx);
+        }
+    }
     let name = match style {
-        None => method.name.to_string(),
+        None => base,
         Some(style) => match style {
-            InterfaceNamingStyle::CamelCase => to_camel_case(method.name.to_string()),
+            InterfaceNamingStyle::CamelCase => to_camel_case(base),
         },
     };
 
@@ -1309,6 +1317,19 @@ mod tests {
                 signature
             );
         }
+    }
+
+    #[test]
+    fn test_fn_selector_overload_suffix_stripped() {
+        // When the Rust ident carries an overload suffix, it should be stripped for selector naming
+        let method = MockMethod::new(
+            "safeTransferFrom__overload1",
+            vec!["from: Address", "to: Address", "tokenId: U256"],
+        );
+        assert_eq!(
+            generate_fn_selector(&method.info(), None).unwrap(),
+            get_selector_from_sig("safeTransferFrom(address,address,uint256)")
+        );
     }
 
     #[test]
