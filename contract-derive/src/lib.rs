@@ -344,6 +344,7 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     // Rename duplicate idents in emitted methods: <base>__overload<n>
+    // Overload normalization details live in helpers::generate_fn_selector (see helpers.rs).
     let mut counts: HashMap<String, usize> = HashMap::new();
     for m in public_methods_owned.iter_mut() {
         let base = m.sig.ident.to_string();
