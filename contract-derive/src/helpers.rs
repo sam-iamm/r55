@@ -45,6 +45,17 @@ impl<'a> MethodInfo<'a> {
     }
 }
 
+// Return external ABI name by stripping a trailing "__overload<digits>" suffix if present.
+fn canonicalize_external_name(ident: &str) -> String {
+    if let Some(idx) = ident.rfind("__overload") {
+        let suffix = &ident[(idx + "__overload".len())..];
+        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+            return ident[..idx].to_string();
+        }
+    }
+    ident.to_string()
+}
+
 // Helper function to get the parameter names + types of a method
 fn get_arg_props<'a>(
     skip_first_arg: bool,
@@ -682,15 +693,17 @@ pub fn gen_downcast_expr(var: TokenStream, ty: &Type) -> TokenStream {
     }
 }
 
-// Helper function to generate fn selector
+// Helper: compute 4-byte selector using canonical external name and canonical param types.
 pub fn generate_fn_selector(
     method: &MethodInfo,
     style: Option<InterfaceNamingStyle>,
 ) -> Option<[u8; 4]> {
+    // Normalize to canonical external name
+    let base = canonicalize_external_name(&method.name.to_string());
     let name = match style {
-        None => method.name.to_string(),
+        None => base,
         Some(style) => match style {
-            InterfaceNamingStyle::CamelCase => to_camel_case(method.name.to_string()),
+            InterfaceNamingStyle::CamelCase => to_camel_case(base),
         },
     };
 
@@ -1309,6 +1322,42 @@ mod tests {
                 signature
             );
         }
+    }
+
+    #[test]
+    fn test_fn_selector_erc721_overload_plain_three_args() {
+        // Plain three-arg overload without relying on any suffix
+        let method = MockMethod::new(
+            "safeTransferFrom",
+            vec!["from: Address", "to: Address", "tokenId: U256"],
+        );
+        assert_eq!(
+            generate_fn_selector(&method.info(), None).unwrap(),
+            get_selector_from_sig("safeTransferFrom(address,address,uint256)")
+        );
+
+        // Plain four-arg overload without relying on any suffix
+        let method = MockMethod::new(
+            "safeTransferFrom",
+            vec!["from: Address", "to: Address", "tokenId: U256", "data: Bytes"],
+        );
+        assert_eq!(
+            generate_fn_selector(&method.info(), None).unwrap(),
+            get_selector_from_sig("safeTransferFrom(address,address,uint256,bytes)")
+        );
+    }
+
+    #[test]
+    fn test_fn_selector_overload_suffix_stripped() {
+        // When the Rust ident carries an overload suffix, it should be stripped for selector naming
+        let method = MockMethod::new(
+            "safeTransferFrom__overload1",
+            vec!["from: Address", "to: Address", "tokenId: U256"],
+        );
+        assert_eq!(
+            generate_fn_selector(&method.info(), None).unwrap(),
+            get_selector_from_sig("safeTransferFrom(address,address,uint256)")
+        );
     }
 
     #[test]
