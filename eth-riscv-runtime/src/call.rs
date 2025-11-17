@@ -176,3 +176,25 @@ pub fn return_data_copy(dest_offset: u64, res_offset: u64, res_size: u64) {
         );
     }
 }
+
+/// Returns the size of the code at the given address (EXTCODESIZE).
+pub fn code_size(addr: Address) -> u64 {
+    // Convert address → 256-bit word using the same pattern as call/staticcall
+    let word: U256 = addr.into_word().into();
+    let limbs = word.as_limbs();
+    let size: u64;
+    unsafe {
+        asm!(
+            "ecall",
+            in("a0") limbs[0], in("a1") limbs[1], in("a2") limbs[2],
+            in("t0") u8::from(Syscall::ExtCodeSize),
+            lateout("a0") size,
+        );
+    }
+    size
+}
+
+/// Returns true if the address has code
+pub fn has_code(addr: Address) -> bool {
+    code_size(addr) > 0
+}
