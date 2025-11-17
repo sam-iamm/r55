@@ -194,7 +194,7 @@ pub fn code_size(addr: Address) -> u64 {
     size
 }
 
-/// Returns true if the address has code (i.e., is a contract).
+/// Returns true if the address has code
 pub fn has_code(addr: Address) -> bool {
     code_size(addr) > 0
 }
