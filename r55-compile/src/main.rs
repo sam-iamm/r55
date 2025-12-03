@@ -58,7 +58,7 @@ fn main() -> eyre::Result<()> {
     // Generate deployable files for the dependencies
     if let Some(contracts_with_deps) = contracts.get(&false) {
         for c in contracts_with_deps {
-            generate_deployable(c)?;
+            generate_deployable(c, &output_dir)?;
         }
     }
 
