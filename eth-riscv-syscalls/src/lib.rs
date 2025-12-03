@@ -64,6 +64,7 @@ macro_rules! syscalls {
 // t0: 0x3e, opcode for returndatacopy, a0: memory offset, a1: return data offset, a2: return data size, returns nothing
 // t0: 0x54, opcode for sload, a0: storage key, returns 256-bit value
 // t0: 0x55, opcode for sstore, a0-a3: 256-bit storage key, a4-a7: 256-bit storage value, returns nothing
+// t0: 0x5A, opcode for gas (gasleft), returns 64-bit remaining gas in a0
 // t0: 0xf0, opcode for create, args: a0: 64-bit value, a1: calldata offset, a2: calldata size, returns an address
 // t0: 0xf1, opcode for call, args: a0-a2: address, a3: 64-bit value, a4: calldata offset, a5: calldata size
 // t0: 0xfa, opcode for staticcall, args: a0-a2: address, a3: 64-bit value, a4: calldata offset, a5: calldata size
@@ -92,6 +93,7 @@ syscalls!(
     (0x48, BaseFee, "basefee"),
     (0x54, SLoad, "sload"),
     (0x55, SStore, "sstore"),
+    (0x5A, GasLeft, "gasleft"),
     (0xf0, Create, "create"),
     (0xf1, Call, "call"),
     (0xfa, StaticCall, "staticcall"),

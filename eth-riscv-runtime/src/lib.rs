@@ -122,6 +122,16 @@ pub fn msg_value() -> U256 {
     U256::from_limbs([first, second, third, fourth])
 }
 
+/// Returns the remaining gas available for the current execution frame.
+/// Corresponds to the EVM `GAS` opcode (0x5A), exposed as `gasleft()` in Solidity.
+pub fn gas_left() -> u64 {
+    let remaining: u64;
+    unsafe {
+        asm!("ecall", lateout("a0") remaining, in("t0") u8::from(Syscall::GasLeft));
+    }
+    remaining
+}
+
 pub fn msg_sig() -> [u8; 4] {
     let sig = unsafe { slice_from_raw_parts(CALLDATA_ADDRESS + 8, 4) };
     sig.try_into().unwrap()
