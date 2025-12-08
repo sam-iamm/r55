@@ -169,7 +169,7 @@ build_from_source() {
 
     # Clone repository
     log_info "Cloning repository..."
-    git clone -b fix/deployable-paths "https://github.com/$REPO_OWNER/$REPO_NAME.git"
+    git clone "https://github.com/$REPO_OWNER/$REPO_NAME.git"
     cd "$REPO_NAME"
 
     # Build the binary
