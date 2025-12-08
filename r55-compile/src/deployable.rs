@@ -1,9 +1,30 @@
 use std::fs;
+use std::path::PathBuf;
 use tracing::info;
 
 use crate::compile::ContractWithDeps;
 
-pub fn generate_deployable(contract: &ContractWithDeps) -> eyre::Result<()> {
+pub fn generate_deployable(contract: &ContractWithDeps, output_dir: &PathBuf) -> eyre::Result<()> {
+    // Calculate relative path from contract's src/ directory to output directory
+    // pathdiff::diff_paths(target, base) returns the relative path from 'base' to 'target'
+    // We need both paths to be absolute for pathdiff to work correctly
+    let contract_src_dir = contract.path.join("src");
+    
+    // Canonicalize paths to ensure they're absolute and resolved (handles symlinks, etc.)
+    // Note: output_dir is created in main.rs before this is called, so it should exist
+    let contract_src_dir = contract_src_dir
+        .canonicalize()
+        .or_else(|_| Ok::<PathBuf, std::io::Error>(contract_src_dir.clone()))?;
+    let output_dir_canonical = output_dir
+        .canonicalize()
+        .or_else(|_| Ok::<PathBuf, std::io::Error>(output_dir.clone()))?;
+    
+    let relative_path = pathdiff::diff_paths(&output_dir_canonical, &contract_src_dir)
+        .ok_or_else(|| eyre::eyre!("Failed to calculate relative path from {:?} to {:?}. Paths may be on different drives or have no common ancestor.", contract_src_dir, output_dir))?;
+    
+    // Convert to string with forward slashes (works on all platforms for include_bytes!)
+    let relative_path_str = relative_path.to_string_lossy().replace('\\', "/");
+
     // Generate the file content
     let mut content = String::new();
 
@@ -29,8 +50,8 @@ pub fn generate_deployable(contract: &ContractWithDeps) -> eyre::Result<()> {
         // Convert dependency name to uppercase for the constant name
         let const_name = dep.name.ident.to_uppercase();
         content.push_str(&format!(
-            "const {}_BYTECODE: &'static [u8] = include_bytes!(\"../../../r55-output-bytecode/{}.bin\");\n", 
-            const_name, dep.name.package
+            "const {}_BYTECODE: &'static [u8] = include_bytes!(\"{}/{}.bin\");\n", 
+            const_name, relative_path_str, dep.name.package
         ));
     }
     content.push('\n');
