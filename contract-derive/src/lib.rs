@@ -329,6 +329,7 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     let mut constructor = None;
+    let mut fallback_method: Option<ImplItemMethod> = None;
     // Work with owned methods so we can rename duplicates safely
     let mut public_methods_owned: Vec<ImplItemMethod> = Vec::new();
 
@@ -337,6 +338,14 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
         if let ImplItem::Method(method) = item {
             if method.sig.ident == "new" {
                 constructor = Some(method);
+            } else if is_fallback(method) {
+                // Solidity-like fallback (explicit): used when calldata < 4 or selector is unknown.
+                // Must be unique; not part of ABI/interface; returns raw bytes (returndata).
+                if fallback_method.is_some() {
+                    panic!("Only one #[fallback] method is supported");
+                }
+                validate_fallback_signature(method);
+                fallback_method = Some(method.clone());
             } else if let syn::Visibility::Public(_) = method.vis {
                 public_methods_owned.push(method.clone());
             }
@@ -357,10 +366,50 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
     }
     let public_methods: Vec<&ImplItemMethod> = public_methods_owned.iter().collect();
 
-    let input_methods: Vec<_> = public_methods
-        .iter()
-        .map(|method| quote! { #method })
-        .collect();
+    // Methods emitted into the runtime impl: public methods + optional fallback.
+    let mut input_methods: Vec<proc_macro2::TokenStream> =
+        public_methods.iter().map(|method| quote! { #method }).collect();
+    if let Some(fallback) = &fallback_method {
+        input_methods.push(quote! { #fallback });
+    }
+
+    let fallback_ident = fallback_method.as_ref().map(|m| m.sig.ident.clone());
+    let fallback_is_payable = fallback_method.as_ref().map(|m| is_payable(m)).unwrap_or(false);
+    let fallback_payable_check = if fallback_is_payable {
+        quote! {}
+    } else {
+        quote! {
+            if eth_riscv_runtime::msg_value() > U256::from(0) {
+                panic!("Non-payable function");
+            }
+        }
+    };
+
+    // Called when calldata is too short to contain a selector (< 4 bytes).
+    // Solidity parity: fallback if present, otherwise revert.
+    let fallback_dispatch_short = if let Some(fb_ident) = &fallback_ident {
+        quote! {
+            let calldata_bytes = alloy_core::primitives::Bytes::from(calldata_full.to_vec());
+            #fallback_payable_check
+            let out = self.#fb_ident(calldata_bytes);
+            eth_riscv_runtime::return_riscv(out.as_ptr() as u64, out.len() as u64);
+        }
+    } else {
+        quote! { eth_riscv_runtime::revert(); }
+    };
+
+    // Called when selector is unknown.
+    // Backward compatible default: panic("unknown method") if no fallback is defined.
+    let fallback_dispatch_unknown = if let Some(fb_ident) = &fallback_ident {
+        quote! {
+            let calldata_bytes = alloy_core::primitives::Bytes::from(calldata_full.to_vec());
+            #fallback_payable_check
+            let out = self.#fb_ident(calldata_bytes);
+            eth_riscv_runtime::return_riscv(out.as_ptr() as u64, out.len() as u64);
+        }
+    } else {
+        quote! { panic!("unknown method") }
+    };
     let match_arms: Vec<_> = public_methods.iter().map(|method| {
         let method_name = &method.sig.ident;
         let method_info = MethodInfo::from(*method);
@@ -543,12 +592,17 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
 
                 fn call_with_data(&mut self, calldata: &[u8]) {
-                    let selector = u32::from_be_bytes([calldata[0], calldata[1], calldata[2], calldata[3]]);
-                    let calldata = &calldata[4..];
+                    let calldata_full = calldata;
+                    if calldata_full.len() < 4 {
+                        #fallback_dispatch_short
+                    }
+
+                    let selector = u32::from_be_bytes([calldata_full[0], calldata_full[1], calldata_full[2], calldata_full[3]]);
+                    let calldata = &calldata_full[4..];
 
                     match selector {
                         #( #match_arms )*
-                        _ => panic!("unknown method"),
+                        _ => { #fallback_dispatch_unknown },
                     }
 
                     return_riscv(0, 0);
@@ -585,6 +639,12 @@ pub fn payable(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+// Empty macro to mark a method as fallback (Solidity-like explicit fallback handler).
+#[proc_macro_attribute]
+pub fn fallback(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
 // Check if a method is tagged with the payable attribute
 fn is_payable(method: &syn::ImplItemMethod) -> bool {
     method.attrs.iter().any(|attr| {
@@ -595,6 +655,67 @@ fn is_payable(method: &syn::ImplItemMethod) -> bool {
         }
         false
     })
+}
+
+// Check if a method is tagged with the fallback attribute
+fn is_fallback(method: &syn::ImplItemMethod) -> bool {
+    method.attrs.iter().any(|attr| {
+        if let Ok(syn::Meta::Path(path)) = attr.parse_meta() {
+            if let Some(segment) = path.segments.first() {
+                return segment.ident == "fallback";
+            }
+        }
+        false
+    })
+}
+
+// Validate fallback signature to enable raw-return semantics needed by proxies.
+//
+// Required:
+// - `pub fn <name>(&mut self, calldata: Bytes) -> Bytes`
+// - tagged with `#[fallback]`
+// - `#[payable]` optional (controls whether value is permitted)
+fn validate_fallback_signature(method: &syn::ImplItemMethod) {
+    if !matches!(method.vis, syn::Visibility::Public(_)) {
+        panic!("#[fallback] method must be public");
+    }
+
+    // args: self + exactly one param
+    let inputs = &method.sig.inputs;
+    if inputs.len() != 2 {
+        panic!("#[fallback] must take exactly one argument: calldata: Bytes");
+    }
+
+    // second arg must be Bytes
+    let mut iter = inputs.iter();
+    let _self_arg = iter.next();
+    let calldata_arg = iter.next().expect("arg");
+    if let syn::FnArg::Typed(pat_ty) = calldata_arg {
+        let ty = &pat_ty.ty;
+        let ty_str = quote! { #ty }.to_string().replace(' ', "");
+        if !(ty_str.ends_with("Bytes")
+            || ty_str.ends_with("primitives::Bytes")
+            || ty_str.ends_with("alloy_core::primitives::Bytes"))
+        {
+            panic!("#[fallback] calldata argument must be Bytes");
+        }
+    } else {
+        panic!("#[fallback] first argument must be self");
+    }
+
+    // return type must be Bytes
+    match &method.sig.output {
+        ReturnType::Type(_, ty) => {
+            let ty_str = quote! { #ty }.to_string().replace(' ', "");
+            if !(ty_str.ends_with("Bytes")
+                || ty_str.ends_with("primitives::Bytes")
+                || ty_str.ends_with("alloy_core::primitives::Bytes"))
+            {
+                panic!("#[fallback] must return Bytes (raw returndata)");
+            }
+        }
+        ReturnType::Default => panic!("#[fallback] must return Bytes (raw returndata)"),
+    }
 }
 
 #[proc_macro_attribute]
