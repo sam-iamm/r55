@@ -124,8 +124,6 @@ pub fn delegatecall_contract(
 }
 
 /// Low-level delegatecall syscall.
-///
-/// Register ABI matches CALL/STATICCALL but with `a3 = 0` (no value transfer).
 pub fn delegatecall(addr: Address, data_offset: u64, data_size: u64) {
     let addr: U256 = addr.into_word().into();
     let addr = addr.as_limbs();
@@ -133,7 +131,7 @@ pub fn delegatecall(addr: Address, data_offset: u64, data_size: u64) {
         asm!(
             "ecall",
             in("a0") addr[0], in("a1") addr[1], in("a2") addr[2],
-            in("a3") 0u64, in("a4") data_offset, in("a5") data_size,
+            in("a4") data_offset, in("a5") data_size,
             in("t0") u8::from(Syscall::DelegateCall)
         );
     }
