@@ -102,6 +102,41 @@ pub fn call(addr: Address, value: u64, data_offset: u64, data_size: u64) {
     }
 }
 
+/// Delegatecall contract (executes in the caller's storage context).
+/// - Ok(Bytes): call succeeded
+/// - Err(Bytes): call reverted (enables automatic revert propagation)
+///
+/// Note: DELEGATECALL does not transfer ETH. The apparent `msg.value` observed by the
+/// delegated code is preserved by the EVM from the parent frame.
+pub fn delegatecall_contract(
+    addr: Address,
+    data: &[u8],
+    ret_size: Option<u64>,
+) -> Result<Bytes, Bytes> {
+    delegatecall(addr, data.as_ptr() as u64, data.len() as u64);
+
+    // Read success from a0 immediately (written by EVM in return_result)
+    let success: u64;
+    unsafe { asm!("mv {out}, a0", out = lateout(reg) success); }
+
+    let out = handle_call_output(ret_size);
+    if success == 1 { Ok(out) } else { Err(out) }
+}
+
+/// Low-level delegatecall syscall.
+pub fn delegatecall(addr: Address, data_offset: u64, data_size: u64) {
+    let addr: U256 = addr.into_word().into();
+    let addr = addr.as_limbs();
+    unsafe {
+        asm!(
+            "ecall",
+            in("a0") addr[0], in("a1") addr[1], in("a2") addr[2],
+            in("a4") data_offset, in("a5") data_size,
+            in("t0") u8::from(Syscall::DelegateCall)
+        );
+    }
+}
+
 /// Staticcall contract (read-only). Same behavior as call_contract.
 pub fn staticcall_contract(addr: Address, value: u64, data: &[u8], ret_size: Option<u64>) -> Result<Bytes, Bytes> {
     staticcall(addr, value, data.as_ptr() as u64, data.len() as u64);
