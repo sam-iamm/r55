@@ -1,22 +1,15 @@
-//! ERC20 Token Implementation (R55/RISC-V)
+//! Bridged ERC20 Token Implementation (R55/RISC-V)
 //!
-//! A complete ERC20 token implementation compiled to RISC-V bytecode for execution
-//! in the Hydra EVM. This contract provides standard token functionality with ownership
-//! controls and metadata (name, symbol, decimals).
+//! A bridged ERC20 token compiled to RISC-V bytecode for execution in the Hydra EVM.
+//! This contract mirrors BridgedERC20 semantics: bridge-controlled mint/burn, metadata,
+//! and decimals sourced from the origin token.
 //!
 //! ## Features
 //! - Standard ERC20 operations: `transfer`, `approve`, `transferFrom`
-//! - Ownership-based minting with `mint` function
-//! - Token metadata: `name`, `symbol`, `decimals`
-//! - Ownership transfer capability
+//! - Bridge-controlled mint/burn
+//! - Token metadata: `name`, `symbol`, `decimals` (from source token)
 //! - Custom error types for clear revert reasons
 //! - Event emission for all state changes
-//!
-//! ## ABI parity (constructors and calldata)
-//! - Interface calldata mirrors Solidity ABI: single-arg uses `abi_encode()`, multi-arg uses
-//!   `abi_encode_params()`.
-//! - Constructors are params-encoded (equivalent to `abi.encode(a,b,...)`). For single-arg
-//!   constructors, pass a 1-tuple `(arg,)` when using the deploy builder.
 //!
 //! ## Storage
 //! - Uses `DynamicSlot<String>` for name/symbol
@@ -25,25 +18,21 @@
 //!
 //! ## Selector parity and deviations
 //! - All public/external methods use camelCase names to match Solidity selectors.
-//! - Deviations from ERC20 reference behavior:
+//! - Deviations from common ERC20 practice:
 //!   - Self-approval is rejected.
 //!   - Self-transfer is rejected.
-//!   - Allowance is always decremented on transferFrom; no "infinite allowance" special-case.
-//!   - Approving the zero address is rejected.
-//!   - transferFrom always requires allowance, even if caller == from (use transfer for self).
-//!   - No EIP-2612 permit, and no increase/decreaseAllowance helpers.
+//!   - Only the bridge may mint/burn; there is no owner role and no ownership transfer.
+//!   - Decimals are read from the source token at construction and stored as `U256`.
 
 #![no_std]
 #![no_main]
 
 use core::default::Default;
 
-use contract_derive::{contract, storage, Error, Event};
+use contract_derive::{contract, storage, Event, Error};
 use eth_riscv_runtime::types::*;
 
-use alloy_core::primitives::{keccak256 as alloy_keccak256, Address, FixedBytes, U256};
-
-type B32 = FixedBytes<32>;
+use alloy_core::primitives::{Address, U256};
 
 extern crate alloc;
 use alloc::string::String;
@@ -110,22 +99,24 @@ pub enum ERC20Error {
 // CONTRACT STATE
 // =============================================================================
 
-/// ERC20 token contract with ownership controls
-///
+/// Bridged ERC20 token with bridge-controlled mint/burn
+/// 
 /// Storage layout uses Slot-based persistence for fixed-size values.
 /// Dynamic strings for name/symbol are stored via DynamicSlot<String>.
 #[storage]
-pub struct ERC20 {
+pub struct BridgedERC20 {
     /// Total token supply across all holders
     total_supply: Slot<U256>,
     /// Mapping from address to token balance
     balance_of: Mapping<Address, Slot<U256>>,
     /// Nested mapping: owner -> spender -> allowance amount
     allowance_of: Mapping<Address, Mapping<Address, Slot<U256>>>,
-    /// Contract owner (authorized to mint)
-    owner: Slot<Address>,
-    /// Token decimals (typically 18 for standard ERC20)
-    decimals: Slot<U256>,
+    /// Decimals for the source token (returned by decimals())
+    source_token_decimals: Slot<U256>,
+    /// Address of the source token (L1/L2 counterpart)
+    source_token_address: Slot<Address>,
+    /// Bridge contract address (only this address can mint/burn)
+    bridge_address: Slot<Address>,
     /// Token name
     name: DynamicSlot<String>,
     /// Token symbol
@@ -137,27 +128,28 @@ pub struct ERC20 {
 // =============================================================================
 
 #[contract]
-impl ERC20 {
+impl BridgedERC20 {
     // -------------------------------------------------------------------------
     // CONSTRUCTOR
     // -------------------------------------------------------------------------
-
-    /// Initializes a new ERC20 token with metadata
-    ///
+    
+    /// Initializes a new bridged ERC20 token
+    /// 
     /// # Arguments
-    /// * `owner` - Address that will own the contract and have minting rights
-    /// * `name` - Human-readable token name (e.g., "Ethereum")
-    /// * `symbol` - Trading symbol (e.g., "ETH")
-    /// * `decimals` - Number of decimal places (typically 18)
-    ///
+    /// * `name` - Human-readable token name
+    /// * `symbol` - Trading symbol
+    /// * `decimals` - Decimals for the source token
+    /// * `source_token` - Address of the source token on the origin chain
+    /// 
     /// # Returns
     /// Initialized ERC20 contract instance
-    pub fn new(owner: Address, name: String, symbol: String, decimals: U256) -> Self {
-        let mut erc20 = ERC20::default();
+    pub fn new(name: String, symbol: String, decimals: u8, source_token: Address, erc20_bridge: Address) -> Self {
+        let mut erc20 = BridgedERC20::default();
 
-        // Update state
-        erc20.owner.write(owner);
-        erc20.decimals.write(decimals);
+        // Bridge authority and source info
+        erc20.bridge_address.write(erc20_bridge);
+        erc20.source_token_decimals.write(U256::from(decimals));
+        erc20.source_token_address.write(source_token);
 
         // Store dynamic metadata
         erc20.name.write(name);
@@ -169,30 +161,22 @@ impl ERC20 {
     // -------------------------------------------------------------------------
     // STATE-MODIFYING FUNCTIONS
     // -------------------------------------------------------------------------
-
-    /// Mints new tokens to a specified address (owner only)
+    
+    /// Mints new tokens to a specified address (bridge only).
     ///
     /// Increases recipient balance and total supply.
     /// Emits Transfer event with `from` = Address::ZERO.
     ///
+    /// Reverts if `msg.sender` is not the bridge, `to` is zero, or `amount` is zero.
+    ///
     /// # Arguments
     /// * `to` - Recipient address
     /// * `amount` - Tokens to mint
-    ///
-    /// # Returns
-    /// * `Ok(true)` on success
-    /// * `Err(ERC20Error)` on validation failure
-    pub fn mint(&mut self, to: Address, amount: U256) -> Result<bool, ERC20Error> {
-        // Access control: only owner can mint
-        if msg_sender() != self.owner.read() {
-            return Err(ERC20Error::OnlyOwner);
-        };
-        if amount == U256::ZERO {
-            return Err(ERC20Error::ZeroAmount);
-        };
-        if to == Address::ZERO {
-            return Err(ERC20Error::ZeroAddress);
-        };
+    pub fn mint(&mut self, to: Address, amount: U256) {
+        // Access control: only bridge can mint
+        if msg_sender() != self.bridge_address.read() { eth_riscv_runtime::revert(); };
+        if amount == U256::ZERO { eth_riscv_runtime::revert(); };
+        if to == Address::ZERO { eth_riscv_runtime::revert(); };
 
         // Update recipient balance
         let to_balance = self.balance_of[to].read();
@@ -200,20 +184,41 @@ impl ERC20 {
 
         // Update total supply
         self.total_supply += amount;
-
+        
         // Emit Transfer event (from = 0x0 for mints)
         log::emit(Transfer::new(Address::ZERO, to, amount));
-        Ok(true)
+    }
+
+    /// Burns tokens from the bridge address (bridge only).
+    ///
+    /// Decreases sender balance and total supply.
+    /// Emits Transfer event with `to` = Address::ZERO.
+    ///
+    /// Reverts if `msg.sender` is not the bridge, `amount` is zero, or balance is
+    /// insufficient.
+    pub fn burn(&mut self, amount: U256) {
+        // Access control: only bridge can burn
+        let bridge = msg_sender();
+        if bridge != self.bridge_address.read() { eth_riscv_runtime::revert(); };
+        if amount == U256::ZERO { eth_riscv_runtime::revert(); };
+
+        let bal = self.balance_of[bridge].read();
+        if bal < amount { eth_riscv_runtime::revert(); };
+
+        self.balance_of[bridge].write(bal - amount);
+        self.total_supply.write(self.total_supply.read() - amount);
+
+        log::emit(Transfer::new(bridge, Address::ZERO, amount));
     }
 
     /// Sets spending allowance for a spender
-    ///
+    /// 
     /// Allows `spender` to withdraw up to `amount` tokens via transferFrom().
-    ///
+    /// 
     /// # Arguments
     /// * `spender` - Address authorized to spend
     /// * `amount` - Maximum spendable amount
-    ///
+    /// 
     /// # Returns
     /// * `Ok(true)` on success
     /// * `Err(ERC20Error)` on validation failure
@@ -221,12 +226,8 @@ impl ERC20 {
         let owner = msg_sender();
 
         // Validation checks
-        if spender == Address::ZERO {
-            return Err(ERC20Error::ZeroAddress);
-        };
-        if spender == owner {
-            return Err(ERC20Error::SelfApproval);
-        };
+        if spender == Address::ZERO { return Err(ERC20Error::ZeroAddress) };
+        if spender == owner { return Err(ERC20Error::SelfApproval) };
 
         // Update allowance mapping
         self.allowance_of[owner][spender].write(amount);
@@ -236,11 +237,11 @@ impl ERC20 {
     }
 
     /// Transfers tokens from caller to another address
-    ///
+    /// 
     /// # Arguments
     /// * `to` - Recipient address
     /// * `amount` - Tokens to transfer
-    ///
+    /// 
     /// # Returns
     /// * `Ok(true)` on success
     /// * `Err(ERC20Error)` on validation failure or insufficient balance
@@ -248,24 +249,16 @@ impl ERC20 {
         let from = msg_sender();
 
         // Validation checks
-        if to == Address::ZERO {
-            return Err(ERC20Error::ZeroAddress);
-        };
-        if amount == U256::ZERO {
-            return Err(ERC20Error::ZeroAmount);
-        };
-        if from == to {
-            return Err(ERC20Error::SelfTransfer);
-        };
+        if to == Address::ZERO { return Err(ERC20Error::ZeroAddress) };
+        if amount == U256::ZERO { return Err(ERC20Error::ZeroAmount) };
+        if from == to { return Err(ERC20Error::SelfTransfer) };
 
         // Load current balances
         let from_balance = self.balance_of[from].read();
         let to_balance = self.balance_of[to].read();
 
         // Check sufficient balance
-        if from_balance < amount {
-            return Err(ERC20Error::InsufficientBalance(from_balance));
-        }
+        if from_balance < amount { return Err(ERC20Error::InsufficientBalance(from_balance)) }
 
         // Update balances atomically
         self.balance_of[from].write(from_balance - amount);
@@ -276,52 +269,31 @@ impl ERC20 {
     }
 
     /// Transfers tokens on behalf of another address using allowance
-    ///
+    /// 
     /// Caller must have sufficient allowance from `from` address.
-    ///
+    /// 
     /// # Arguments
     /// * `from` - Token owner (must have approved caller)
     /// * `to` - Recipient address
     /// * `amount` - Tokens to transfer
-    ///
+    /// 
     /// # Returns
     /// * `Ok(true)` on success
     /// * `Err(ERC20Error)` on insufficient allowance or balance
-    pub fn transferFrom(
-        &mut self,
-        from: Address,
-        to: Address,
-        amount: U256,
-    ) -> Result<bool, ERC20Error> {
-        let msg_sender = msg_sender();
+    pub fn transferFrom(&mut self, from: Address, to: Address, amount: U256) -> Result<bool, ERC20Error> {
+        let caller = msg_sender();
 
-        // Validation checks
-        if to == Address::ZERO {
-            return Err(ERC20Error::ZeroAddress);
-        };
-        if amount == U256::ZERO {
-            return Err(ERC20Error::ZeroAmount);
-        };
-        if from == to {
-            return Err(ERC20Error::SelfTransfer);
-        };
+        if to == Address::ZERO { return Err(ERC20Error::ZeroAddress) };
+        if amount == U256::ZERO { return Err(ERC20Error::ZeroAmount) };
+        if from == to { return Err(ERC20Error::SelfTransfer) };
 
-        // Check allowance (caller must be approved by `from`)
-        let allowance = self.allowance_of[from][msg_sender].read();
-        if allowance < amount {
-            return Err(ERC20Error::InsufficientAllowance(allowance));
-        };
+        let allowance = self.allowance_of[from][caller].read();
+        if allowance < amount { return Err(ERC20Error::InsufficientAllowance(allowance)) };
 
-        // Check balance
         let from_balance = self.balance_of[from].read();
-        if from_balance < amount {
-            return Err(ERC20Error::InsufficientBalance(from_balance));
-        };
+        if from_balance < amount { return Err(ERC20Error::InsufficientBalance(from_balance)) };
 
-        // Update allowance (decrease by amount spent)
-        self.allowance_of[from][msg_sender].write(allowance - amount);
-
-        // Update balances atomically
+        self.allowance_of[from][caller].write(allowance - amount);
         self.balance_of[from].write(from_balance - amount);
         let to_balance = self.balance_of[to].read();
         self.balance_of[to].write(to_balance + amount);
@@ -330,74 +302,44 @@ impl ERC20 {
         Ok(true)
     }
 
-    /// Transfers contract ownership to a new address (owner only)
-    ///
-    /// New owner will have minting rights.
-    ///
-    /// # Arguments
-    /// * `new_owner` - New contract owner
-    ///
-    /// # Returns
-    /// * `Ok(true)` on success
-    /// * `Err(ERC20Error::OnlyOwner)` if caller is not owner
-    pub fn transferOwnership(&mut self, new_owner: Address) -> Result<bool, ERC20Error> {
-        let from = msg_sender();
-
-        // Access control + validation
-        if from != self.owner.read() {
-            return Err(ERC20Error::OnlyOwner);
-        };
-        if from == new_owner {
-            return Err(ERC20Error::SelfTransfer);
-        };
-
-        // Update owner
-        self.owner.write(new_owner);
-
-        log::emit(OwnershipTransferred::new(from, new_owner));
-        Ok(true)
-    }
+    // No ownership transfer in bridged token; bridge is immutable authority.
 
     // -------------------------------------------------------------------------
     // VIEW FUNCTIONS
     // -------------------------------------------------------------------------
+    
+    /// ERC20 camelCase view: totalSupply()
+    pub fn totalSupply(&self) -> U256 { self.total_supply.read() }
 
-    /// Returns the current contract owner address
-    pub fn owner(&self) -> Address {
-        self.owner.read()
-    }
-
-    /// CamelCase view: totalSupply() -> uint256 (Solidity selector parity)
-    pub fn totalSupply(&self) -> U256 {
-        self.total_supply.read()
-    }
-
-    /// CamelCase view: balanceOf(address) -> uint256 (Solidity selector parity)
+    /// ERC20 camelCase view: balanceOf(address)
     pub fn balanceOf(&self, owner: Address) -> U256 {
         self.balance_of[owner].read()
     }
 
-    /// Returns the allowance granted by owner to spender (Solidity selector parity)
+    /// Returns the allowance granted by owner to spender
     pub fn allowance(&self, owner: Address, spender: Address) -> U256 {
         self.allowance_of[owner][spender].read()
     }
 
-    /// Returns token decimals (standard is 18)
-    pub fn decimals(&self) -> U256 {
-        self.decimals.read()
-    }
+    /// Returns token decimals (from source token)
+    pub fn decimals(&self) -> U256 { self.source_token_decimals.read() }
+
+    /// Getter parity with Solidity public immutable: sourceTokenDecimals()
+    pub fn sourceTokenDecimals(&self) -> U256 { self.source_token_decimals.read() }
+
+    /// Getter parity with Solidity public immutable: sourceTokenAddress()
+    pub fn sourceTokenAddress(&self) -> Address { self.source_token_address.read() }
+
+    /// Getter parity with Solidity public immutable: bridgeAddress()
+    pub fn bridgeAddress(&self) -> Address { self.bridge_address.read() }
 
     // -------------------------------------------------------------------------
     // METADATA (IERC20Metadata)
     // -------------------------------------------------------------------------
-
+    
     /// Returns token name
-    pub fn name(&self) -> String {
-        self.name.read()
-    }
+    pub fn name(&self) -> String { self.name.read() }
 
     /// Returns token symbol
-    pub fn symbol(&self) -> String {
-        self.symbol.read()
-    }
+    pub fn symbol(&self) -> String { self.symbol.read() }
 }

@@ -90,8 +90,8 @@ fn test_calldata_deposit_bytes_address() {
     let calldata = call.abi_encode();
     info!("calldata: 0x{}", hex::encode(&calldata));
 
-    let result =
-        run_tx(&mut db, &contract, calldata, &ALICE).expect("depositBytesAddress(bytes,address) call failed");
+    let result = run_tx(&mut db, &contract, calldata, &ALICE)
+        .expect("depositBytesAddress(bytes,address) call failed");
 
     use alloy_core::{hex, primitives::keccak256};
     use alloy_sol_types::SolValue;
@@ -205,7 +205,12 @@ fn test_calldata_deposit() {
     let data = Bytes::from("Test");
     let data2 = Bytes::from("Test2");
     let to2 = BOB;
-    let call = depositCall { to, data: data.clone(), data2: data2.clone(), to2 };
+    let call = depositCall {
+        to,
+        data: data.clone(),
+        data2: data2.clone(),
+        to2,
+    };
     let calldata = call.abi_encode();
     info!("calldata: 0x{}", hex::encode(&calldata));
     let result = run_tx(&mut db, &contract, calldata, &ALICE)
@@ -238,8 +243,8 @@ fn test_calldata_deposit_bytes_r55() {
     calldata.append(&mut encoded_params);
 
     // the call manages to still succeed
-    let result =
-        run_tx(&mut db, &contract, calldata, &ALICE).expect("depositBytes(bytes) tuple encoding failed");
+    let result = run_tx(&mut db, &contract, calldata, &ALICE)
+        .expect("depositBytes(bytes) tuple encoding failed");
 
     // Expected: keccak256(abi.encode(data))
     use alloy_core::primitives::keccak256;
@@ -264,8 +269,8 @@ fn test_calldata_deposit_bytes32_r55() {
     calldata.append(&mut params);
 
     // this still succeeds
-    let _ =
-        run_tx(&mut db, &contract, calldata, &ALICE).expect("depositBytes32(bytes32) tuple encoding failed");
+    let _ = run_tx(&mut db, &contract, calldata, &ALICE)
+        .expect("depositBytes32(bytes32) tuple encoding failed");
 }
 
 #[test]
@@ -383,8 +388,8 @@ fn test_empty_bytes_edge_case() {
     let calldata = call.abi_encode();
     info!("calldata: 0x{}", hex::encode(&calldata));
 
-    let result = run_tx(&mut db, &contract, calldata, &ALICE)
-        .expect("depositEmptyBytes(bytes) call failed");
+    let result =
+        run_tx(&mut db, &contract, calldata, &ALICE).expect("depositEmptyBytes(bytes) call failed");
 
     use alloy_core::{hex, primitives::keccak256};
     use alloy_sol_types::SolValue;
@@ -406,8 +411,8 @@ fn test_long_bytes_stress_test() {
     let calldata = call.abi_encode();
     info!("calldata length: {} bytes", calldata.len());
 
-    let result = run_tx(&mut db, &contract, calldata, &ALICE)
-        .expect("depositLongBytes(bytes) call failed");
+    let result =
+        run_tx(&mut db, &contract, calldata, &ALICE).expect("depositLongBytes(bytes) call failed");
 
     use alloy_core::{hex, primitives::keccak256};
     use alloy_sol_types::SolValue;
@@ -427,8 +432,8 @@ fn test_address_validation() {
     let calldata = call.abi_encode();
     info!("calldata: 0x{}", hex::encode(&calldata));
 
-    let result = run_tx(&mut db, &contract, calldata, &ALICE)
-        .expect("validateAddress(address) call failed");
+    let result =
+        run_tx(&mut db, &contract, calldata, &ALICE).expect("validateAddress(address) call failed");
 
     use alloy_core::{hex, primitives::keccak256};
     use alloy_sol_types::SolValue;
@@ -481,17 +486,23 @@ fn test_manual_calldata_verification() {
     let calldata = decode_calldata_from_hex(manual_calldata_hex);
     info!("Manual calldata: 0x{}", hex::encode(&calldata));
 
-    let result = run_tx(&mut db, &contract, calldata, &ALICE)
-        .expect("Manual calldata test failed");
+    let result = run_tx(&mut db, &contract, calldata, &ALICE).expect("Manual calldata test failed");
 
     // Expected: keccak256(abi.encode(0x000000000000000000000000000000000000000A, "Test", "Test2", 0x000000000000000000000000000000000000000B))
     use alloy_core::{hex, primitives::keccak256};
     use alloy_sol_types::SolValue;
-    let expected_to = Address::from([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0A]);
+    let expected_to = Address::from([
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x0A,
+    ]);
     let expected_data = Bytes::from("Test");
     let expected_data2 = Bytes::from("Test2");
-    let expected_to2 = Address::from([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0B]);
-    let expected = keccak256(&(expected_to, expected_data, expected_data2, expected_to2).abi_encode());
+    let expected_to2 = Address::from([
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x0B,
+    ]);
+    let expected =
+        keccak256(&(expected_to, expected_data, expected_data2, expected_to2).abi_encode());
 
     info!("Expected: {:?}", expected);
     info!("raw output: 0x{}", hex::encode(&result.output));
@@ -503,11 +514,7 @@ fn test_different_address_values() {
     let SimpleDepositSetup { mut db, contract } = simple_deposit_setup();
 
     // Test with different address combinations
-    let test_cases = vec![
-        (ALICE, BOB),
-        (BOB, CAROL),
-        (CAROL, ALICE),
-    ];
+    let test_cases = vec![(ALICE, BOB), (BOB, CAROL), (CAROL, ALICE)];
 
     for (addr1, addr2) in test_cases {
         let call = validateAddressCall { addr: addr1 };
@@ -520,8 +527,12 @@ fn test_different_address_values() {
         use alloy_sol_types::SolValue;
         let expected = keccak256(&(addr1,).abi_encode());
 
-        assert_eq!(result.output.as_slice(), expected.as_slice(), 
-            "Failed for address {:?}", addr1);
+        assert_eq!(
+            result.output.as_slice(),
+            expected.as_slice(),
+            "Failed for address {:?}",
+            addr1
+        );
     }
 }
 
@@ -544,7 +555,11 @@ fn test_various_byte_lengths() {
         use alloy_sol_types::SolValue;
         let expected = keccak256(&(data,).abi_encode());
 
-        assert_eq!(result.output.as_slice(), expected.as_slice(), 
-            "Failed for byte length {}", len);
+        assert_eq!(
+            result.output.as_slice(),
+            expected.as_slice(),
+            "Failed for byte length {}",
+            len
+        );
     }
 }
