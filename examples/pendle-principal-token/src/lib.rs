@@ -1,15 +1,82 @@
-//! Pendle Principal Token (PT) — HydraStorage decorrelated implementation.
+//! # PendlePrincipalToken (PT) — Hydra N=2 Implementation
 //!
-//! Goals:
-//! - ABI parity with Solidity PT (inputs/outputs/selectors).
-//! - Single-file implementation (no inheritance) including ERC20 base logic.
-//! - Access control: only factory may initialize, only YT may mint/burn.
-//! - Reentrancy guard on transfer/transferFrom.
-//! - Expiry check via block timestamp syscall.
+//! ## Overview
+//! This R55 contract implements a Hydra-compatible N=2 version of Pendle's Principal Token (PT).
+//! PT represents the principal component of a tokenized yield position, paired with Yield Token (YT).
+//! Provides ABI parity with Solidity PT contracts for decorrelated Hydra execution. While simpler than YT,
+//! PT is critical for maintaining supply invariants in PY pairs.
 //!
-//! Differences vs Solidity:
-//! - Immutables stored in slots (SY, factory, expiry, decimals).
-//! - Storage not packed; uses dedicated slots/mappings.
+//! ## Solidity Reference
+//! - **Main Contract**: `pendle-core-v2-public/contracts/core/YieldContracts/PendlePrincipalToken.sol`
+//! - **Inheritance**: `PendleERC20` for ERC20 base, with PT-specific mint/burn.
+//!
+//! ## Key Features
+//! - **Mint by YT**: Only YT contract can mint PT tokens (during PY minting; 1:1 with YT).
+//! - **Burn by YT**: Only YT contract can burn PT tokens (during PY redeeming; pre-expiry only).
+//! - **ERC20 Interface**: Standard ERC20 functions for PT tokens (transfer, approve, etc.).
+//! - **Expiry**: Immutable expiry timestamp; PT value matures at expiry (no further minting).
+//! - **Access Control**: Factory initializes; only YT can modify supply (critical invariant).
+//! - **Reentrancy Protection**: Guards on transfers.
+//!
+//! ## Execution Flow (high level)
+//! - Factory deploys PT with `(SY, name, symbol, decimals, expiry)`; PT records `factory = msg.sender`.
+//! - Factory calls `initialize(YT)` exactly once to set the paired YT address.
+//! - YT calls `mintByYT(user, amount)` / `burnByYT(user, amount)` to keep PT supply paired with YT.
+//! - Regular ERC20 operations (`transfer`, `transferFrom`, `approve`) work with reentrancy guard + checks.
+//!
+//! ## Hydra N=2 Specifics
+//! - **Storage Mode**: HydraStorage (separate N=2 storage for decorrelation).
+//! - **Immutables**: SY, factory, expiry, decimals stored in slots (cannot change post-deployment).
+//! - **Mint/Burn**: Restricted to YT caller via `onlyYT` modifier; ensures paired operations.
+//! - **ABI Parity**: Public/external functions and events match Solidity exactly for N=1/N=2 equivalence.
+//!
+//! ## Security Considerations
+//! - **Reentrancy**: Guards prevent reentrant calls on transfers.
+//! - **Access Control**: Only YT can mint/burn; no owner (relies on external governance).
+//! - **Supply Invariants**: Mint/burn must be paired with YT operations; expiry prevents post-expiry minting.
+//! - **ERC20 Assumptions**: Standard ERC20 behavior; no custom transfer hooks.
+//!
+//! ## Edge Cases & Assumptions
+//! - **Expiry Effects**: Post-expiry, no new minting; PT holders redeem via YT flows.
+//! - **Zero Transfers**: Allowed but guarded against invalid operations.
+//! - **Caller Validation**: `onlyYT` ensures only paired YT can modify supply; invalid callers revert.
+//! - **Decimals/Expiry**: Must be set correctly at deployment; immutable post-init.
+//! - **Balance Checks**: Transfer guards prevent insufficient balances.
+//!
+//! ## Differences from Solidity
+//! - Single-file implementation (no inheritance; inline ERC20 logic).
+//! - Storage uses slots/mappings instead of Solidity packed storage (HydraStorage allows differences).
+//! - Expiry checked via R55 block timestamp syscall (not Solidity block.timestamp).
+//! - Access control via modifiers (not OZ Ownable; simpler for N=2).
+//! - No Pausable (PT doesn't override; add if needed).
+//!
+//! ## Complexities
+//! - Supply synchronization with YT: Critical for PY pair integrity.
+//! - Expiry handling: Immutable timestamp affects minting permissions.
+//! - ERC20 base logic: Inline to avoid inheritance complexities in R55.
+//!
+//! ## Performance Notes
+//! - Simple ERC20 operations: Low overhead.
+//! - R55 syscalls: Efficient for transfers and timestamp checks.
+//!
+//! ## Extensibility
+//! - Add pausing: Implement emergency stops if needed.
+//! - Governance: Add owner controls for factory updates.
+//! - Custom Logic: Extend for non-standard PT behaviors.
+//!
+//! ## Testing Notes
+//! - **Parity Tests**: Compare mint/burn/transfer outputs with Solidity N=1.
+//! - **Invariants**: Verify supply changes only via YT; expiry blocks minting.
+//! - **Edge Cases**: Invalid callers, post-expiry attempts, zero amounts.
+//! - **Integration**: Test with YT in PY mint/redeem flows; ensure paired operations.
+//!
+//! ## Usage
+//! Deploy Solidity N=1 PT first, then attach this R55 N=2 in Hydra for parallel execution.
+//!
+//! ## References
+//! - Pendle PT Docs: PT as principal-bearing tokens.
+//! - Paired with YT for full PY (Principal + Yield) positions.
+//! - DeFi Risks: Supply mismatches between PT/YT can break invariants; strict access control required.
 #![no_std]
 #![no_main]
 

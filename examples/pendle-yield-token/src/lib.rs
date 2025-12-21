@@ -1,5 +1,105 @@
-//! Pendle Yield Token (YT) — HydraStorage N=2 scaffold.
-//! Focus: ABI parity; logic to be filled incrementally.
+//! # PendleYieldToken (YT) — Hydra N=2 Implementation
+//!
+//! ## Overview
+//! This R55 contract implements a Hydra-compatible N=2 version of Pendle's Yield Token (YT).
+//! YT represents the future yield component of a Pendle Principal Token (PT), accruing interest and rewards over time.
+//! Provides ABI parity with Solidity YT contracts for decorrelated Hydra execution. This is a highly complex DeFi contract
+//! handling accrual, fees, and post-expiry logic.
+//!
+//! ## Solidity Reference
+//! - **Main Contract**: `pendle-core-v2-public/contracts/core/YieldContracts/PendleYieldToken.sol`
+//! - **Inheritance**:
+//!   - `RewardManagerAbstract`: Handles reward distribution from SY.
+//!   - `InterestManagerYT`: Manages interest accrual based on PY index.
+//!   - `PendleERC20`: ERC20 base for YT tokens.
+//!
+//! ## Key Features
+//! - **Mint PY**: Deposit SY into PT + YT pair (PT for principal, YT for yield rights); computes PY amount via SY conversion.
+//! - **Redeem PY**: Burn YT (and PT if pre-expiry) to withdraw SY; post-expiry accrues treasury interest.
+//! - **Interest Accrual**: YT holders earn interest from underlying SY yields (tracked via monotonic PY index).
+//! - **Reward Accrual**: YT holders receive rewards from SY (distributed via user indexes and shares).
+//! - **Post-Expiry**: After expiry, treasury collects remaining interest/rewards; users redeem via PT.
+//! - **Fee Handling**: Interest/reward fees paid to factory treasury on redemptions.
+//! - **PY Index**: Monotonic, cached per block; determines interest accrual (non-decreasing).
+//! - **Hooks**: Before-transfer hooks for accrual on any balance changes (transfers, mints, redeems).
+//!
+//! ## Hydra N=2 Specifics
+//! - **Storage Mode**: HydraStorage (separate N=2 storage for decorrelation).
+//! - **Accrual Mechanics**: Reward/interest distribution uses user-specific indexes and accruals (inline RewardManager/InterestManager).
+//! - **this_address**: Used for contract-held balances (PT/YT during redeem); must be set accurately.
+//! - **Post-Expiry**: Snapshot PY index, reward indexes, and owed amounts; treasury payouts include external reward redemption.
+//! - **ABI Parity**: All functions, events, and return types match Solidity for N=1/N=2 equivalence.
+//!
+//! ## Execution Flow (high level)
+//! - Factory deploys YT and sets `(SY, PT, factory, expiry, doCacheIndexSameBlock)`.
+//!   - This implementation sets `this_address` during construction (used for internal reserve/balance reads).
+//! - Core entrypoints:
+//!   - `mintPY(...)`: pull SY, compute PY output using the SY exchange rate / PY index, mint PT+YT in lockstep.
+//!   - `redeemPY(...)`: burn YT (and PT pre-expiry), return SY; post-expiry performs treasury accounting.
+//!   - Transfers call into “before transfer” accrual hooks to keep indexes and user accruals consistent.
+//! - External calls (critical to parity):
+//!   - SY: `exchangeRate`, `rewardIndexesCurrent`, `getRewardTokens`, `claimRewards`
+//!   - Factory: `treasury`, `rewardFeeRate`, `interestFeeRate`
+//!   - PT: `mintByYT`, `burnByYT`
+//!
+//! ## Where divergence is most likely
+//! - Interest/reward math (rounding/truncation) and index caching (block.number vs runtime syscall).
+//! - Post-expiry snapshots + fee paths that mix external calls (SY reward claiming) with internal accounting.
+//!
+//! ## Security Considerations
+//! - **Reentrancy**: Guards on all state-changing functions (mint, redeem, transfers).
+//! - **Overflow/Underflow**: U256 arithmetic; careful with multiplication/division in accrual (e.g., interestFromYT formula).
+//! - **Access Control**: Factory-only setter for `this_address`; no owner/pause (relies on external governance).
+//! - **Index Monotonicity**: PY index must not decrease; enforced via max with cached value.
+//! - **Treasury Assumptions**: Factory treasury address must be valid; fees sent correctly.
+//!
+//! ## Edge Cases & Assumptions
+//! - **Expiry Handling**: Pre-expiry burns both PT/YT; post-expiry only YT; index snapshots at expiry.
+//! - **Zero Balances/Amounts**: Reverts on zero mint/redeem; accrual skips zero balances.
+//! - **Rounding Errors**: Interest/reward calculations use divDown-like behavior (truncation); verify against Solidity.
+//! - **External Rewards**: Redeemed once per redemption if balances short; assumes SY.claimRewards succeeds.
+//! - **Large Numbers**: U256 handles large amounts, but test for precision in accrual math.
+//! - **Post-Expiry Owed**: Tracks user reward owed; treasury collects deltas.
+//!
+//! ## Differences from Solidity
+//! - Single-file implementation (no inheritance; inline RewardManager/InterestManager logic).
+//! - Storage uses slots/mappings (not Solidity structs; HydraStorage allows differences).
+//! - Index caching via R55 block syscall (not Solidity block.number).
+//! - No Pausable (YT doesn't override; add if needed for emergencies).
+//! - Accrual math inlined (no separate contracts; potential for divergence if not exact).
+//!
+//! ## Complexities
+//! - Accrual hooks before transfers/mints/redeems (critical for state consistency).
+//! - Post-expiry data snapshots and treasury payouts (multi-step with external calls).
+//! - Fee calculations (reward/interest rates from factory; applied on redemption).
+//! - PY index monotonicity and expiry detection (via block timestamp).
+//! - Reward shares based on SY-equivalent YT balance + accrued interest.
+//!
+//! ## Performance Notes
+//! - Accrual on every transfer: Higher gas but ensures up-to-date state.
+//! - R55 syscalls: Efficient for block/timestamp, but external SY calls add overhead.
+//! - Post-expiry snapshots: One-time cost after expiry.
+//!
+//! ## Extensibility
+//! - Add pausing: Implement emergency pause/unpause.
+//! - Custom rewards: Extend reward logic for non-SY rewards.
+//! - Governance: Add owner controls for fees or parameters.
+//!
+//! ## Testing Notes
+//! - **Parity Tests**: Compare mint/redeem/accrual outputs with Solidity N=1 across expiry scenarios.
+//! - **Math Precision**: Verify interest/reward calculations (e.g., divDown truncation).
+//! - **Edge Cases**: Zero amounts, expiry transitions, large balances, treasury invalid.
+//! - **Hooks**: Ensure accrual runs before all balance changes.
+//! - **Integration**: Test with PT and SY in full PY flows; verify Hydra N=2 vs N=1 logs.
+//!
+//! ## Usage
+//! Deploy Solidity N=1 YT first, then attach this R55 N=2 in Hydra for parallel execution.
+//!
+//! ## References
+//! - Pendle YT Docs: YT as yield-bearing tokens.
+//! - RewardManagerAbstract: Reward distribution logic.
+//! - InterestManagerYT: Interest accrual via PY index.
+//! - DeFi Risks: Complex accrual math can lead to precision errors; thorough auditing required.
 
 #![no_std]
 #![no_main]
@@ -10,6 +110,7 @@ use alloc::{string::String, vec::Vec};
 use alloy_core::primitives::{Address, U256};
 use contract_derive::{contract, storage, Error, Event, interface};
 use eth_riscv_runtime::types::*;
+use eth_riscv_runtime::tx;
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -215,7 +316,6 @@ impl PendleYieldToken {
     pub fn new(
         sy: Address,
         pt: Address,
-        this_address: Address,
         name: String,
         symbol: String,
         decimals: U256,
@@ -227,7 +327,8 @@ impl PendleYieldToken {
         yt.sy.write(sy);
         yt.pt.write(pt);
         yt.factory.write(msg_sender());
-        yt.this_address.write(this_address);
+        // Populate `address(this)` using EVM `ADDRESS (0x30)`.
+        yt.this_address.write(tx::address());
         yt.expiry.write(expiry);
         yt.decimals.write(decimals);
         yt.name.write(name);
@@ -284,9 +385,6 @@ impl PendleYieldToken {
 
     pub fn transfer(&mut self, to: Address, amount: U256) -> Result<bool, YTError> {
         self.non_reentrant(|this| {
-            // Match Solidity _beforeTokenTransfer ordering: rewards then interest
-            this.distribute_rewards_for_two(msg_sender(), to)?;
-            this.distribute_interest_for_two(msg_sender(), to)?;
             this._transfer(msg_sender(), to, amount)?;
             Ok(true)
         })
@@ -295,8 +393,6 @@ impl PendleYieldToken {
     pub fn transferFrom(&mut self, from: Address, to: Address, amount: U256) -> Result<bool, YTError> {
         self.non_reentrant(|this| {
             let spender = msg_sender();
-            this.distribute_rewards_for_two(from, to)?;
-            this.distribute_interest_for_two(from, to)?;
             this._spend_allowance(from, spender, amount)?;
             this._transfer(from, to, amount)?;
             Ok(true)
@@ -446,14 +542,13 @@ impl PendleYieldToken {
         }
         self.non_reentrant(|this| {
             this.update_data()?;
-            this.distribute_rewards_for_two(_receiver_yt, Address::ZERO)?;
-            this.distribute_interest_for_two(_receiver_yt, Address::ZERO)?;
             let floating_sy = this.get_floating_sy_amount()?;
             let index = this.pyIndexCurrent()?; // updates cache if needed
             let amount_py_out = this.calc_py_to_mint(floating_sy, index);
+            // Match Solidity order: YT first, then PT
+            this._mint(_receiver_yt, amount_py_out)?;
             let mut pt = IPPrincipalToken::new(this.pt.read()).with_ctx(&mut *this);
             pt.mintByYT(_receiver_pt, amount_py_out).expect("PT.mintByYT failed");
-            this._mint(_receiver_yt, amount_py_out)?;
             this.update_sy_reserve();
             log::emit(Mint::new(msg_sender(), _receiver_pt, _receiver_yt, floating_sy, amount_py_out));
             Ok(amount_py_out)
@@ -486,12 +581,11 @@ impl PendleYieldToken {
                 return Err(YTError::YieldContractInsufficientSy(total_sy_to_mint, floating_sy));
             }
             for ((rp, ry), sy_amt) in _receiver_pts.into_iter().zip(_receiver_yts.into_iter()).zip(_amount_sy_to_mints.into_iter()) {
-                this.distribute_rewards_for_two(ry, Address::ZERO)?;
-                this.distribute_interest_for_two(ry, Address::ZERO)?;
                 let amount_py_out = this.calc_py_to_mint(sy_amt, index);
+                // Match Solidity order: YT first, then PT
+                this._mint(ry, amount_py_out)?;
                 let mut pt = IPPrincipalToken::new(this.pt.read()).with_ctx(&mut *this);
                 pt.mintByYT(rp, amount_py_out).expect("PT.mintByYT failed");
-                this._mint(ry, amount_py_out)?;
                 out.push(amount_py_out);
                 log::emit(Mint::new(msg_sender(), rp, ry, sy_amt, amount_py_out));
             }
@@ -506,8 +600,6 @@ impl PendleYieldToken {
         }
         self.non_reentrant(|this| {
             this.update_data()?;
-            this.distribute_rewards_for_two(this.this_address.read(), _receiver)?;
-            this.distribute_interest_for_two(this.this_address.read(), _receiver)?;
             let amount_py_to_redeem = this.get_amount_py_to_redeem()?;
             let mut pt = IPPrincipalToken::new(this.pt.read()).with_ctx(&mut *this);
             pt.burnByYT(this.this_address.read(), amount_py_to_redeem).expect("PT.burnByYT failed");
@@ -539,8 +631,6 @@ impl PendleYieldToken {
         }
         self.non_reentrant(|this| {
             this.update_data()?;
-            this.distribute_rewards_for_two(this.this_address.read(), Address::ZERO)?;
-            this.distribute_interest_for_two(this.this_address.read(), Address::ZERO)?;
             let mut out = Vec::with_capacity(_receivers.len());
             let total_py = _amount_py_to_redeems.iter().fold(U256::ZERO, |acc, v| acc + *v);
             {
@@ -593,8 +683,8 @@ impl PendleYieldToken {
         }
         self.non_reentrant(|this| {
             this.update_data()?;
+            // Match Solidity: only distribute rewards upfront (line 178)
             this.distribute_rewards_for_two(_user, Address::ZERO)?;
-            this.distribute_interest_for_two(_user, Address::ZERO)?;
             let mut sy = IStandardizedYield::new(this.sy.read()).with_ctx(&mut *this);
             let reward_tokens = sy.getRewardTokens().expect("SY.getRewardTokens failed");
             let reward_fee_rate = this.rewardFeeRate();
@@ -605,6 +695,7 @@ impl PendleYieldToken {
                 let expired = this.expiry.read() <= eth_riscv_runtime::block::timestamp();
                 for token in reward_tokens.iter() {
                     let accrued = this.user_reward_accrued[*token][_user].read();
+                    this.user_reward_accrued[*token][_user].write(U256::ZERO);
                     let fee = accrued * reward_fee_rate / ONE;
                     let payout = accrued.saturating_sub(fee);
                     if (!payout.is_zero() || !fee.is_zero()) && !redeemed_external {
@@ -625,15 +716,15 @@ impl PendleYieldToken {
                         let new_owed = if owed > accrued { owed - accrued } else { U256::ZERO };
                         this.post_expiry_user_reward_owed[*token].write(new_owed);
                     }
-                    if !payout.is_zero() {
-                        this.transfer_reward_out(*token, _user, payout)?;
-                    }
+                    // Match Solidity order: treasury first, then user
                     if !fee.is_zero() {
                         this.transfer_reward_out(*token, this.treasury(), fee)?;
                         log::emit(CollectRewardFee::new(*token, fee));
                     }
+                    if !payout.is_zero() {
+                        this.transfer_reward_out(*token, _user, payout)?;
+                    }
                     rewards_out.push(payout);
-                    this.user_reward_accrued[*token][_user].write(U256::ZERO);
                 }
                 log::emit(RedeemRewards::new(_user, rewards_out.clone()));
             } else {
@@ -641,19 +732,24 @@ impl PendleYieldToken {
             }
             let mut interest_out = U256::ZERO;
             if _redeem_interest {
+                // Match Solidity: distribute interest AFTER rewards are handled (line 189)
+                this.distribute_interest_for_two(_user, Address::ZERO)?;
+                // Match Solidity: zero immediately after reading (line 51)
                 let accrued = this.user_interest_accrued[_user].read();
+                this.user_interest_accrued[_user].write(U256::ZERO);
                 let fee = accrued * interest_fee_rate / ONE;
                 interest_out = accrued.saturating_sub(fee);
-                if !interest_out.is_zero() {
-                    this.transfer_sy_out(_user, interest_out)?;
-                }
+                // Match Solidity order: treasury first, then user
                 if !fee.is_zero() {
                     this.transfer_sy_out(this.treasury(), fee)?;
                     log::emit(CollectInterestFee::new(fee));
                 }
-                this.user_interest_accrued[_user].write(U256::ZERO);
+                if !interest_out.is_zero() {
+                    this.transfer_sy_out(_user, interest_out)?;
+                }
                 log::emit(RedeemInterest::new(_user, interest_out));
             }
+            this.update_sy_reserve();
             Ok((interest_out, rewards_out))
         })
     }
@@ -661,6 +757,8 @@ impl PendleYieldToken {
     pub fn redeemInterestAndRewardsPostExpiryForTreasury(&mut self) -> Result<(U256, Vec<U256>), YTError> {
         self.check_expired()?;
         self.non_reentrant(|this| {
+            // Match Solidity's updateData modifier: set post-expiry data if needed
+            this.update_data()?;
             if this.post_expiry_first_py_index.read().is_zero() {
                 return Err(YTError::YCPostExpiryDataNotSet);
             }
@@ -668,6 +766,7 @@ impl PendleYieldToken {
             let mut sy = IStandardizedYield::new(this.sy.read()).with_ctx(&mut *this);
             let reward_tokens = sy.getRewardTokens().expect("SY.getRewardTokens failed");
             let treasury = this.treasury();
+            // Match Solidity order: calculate all rewards first
             let mut rewards_out = Vec::with_capacity(reward_tokens.len());
             for token in reward_tokens.iter() {
                 let token_reader = IERC20Minimal::new(*token).with_ctx(&*this);
@@ -679,11 +778,19 @@ impl PendleYieldToken {
                     let bal2 = token_reader.balanceOf(this.this_address.read()).expect("reward balanceOf failed");
                     payout = bal2.saturating_sub(owed);
                 }
-                if !payout.is_zero() {
-                    this.transfer_reward_out(*token, treasury, payout)?;
-                    log::emit(CollectRewardFee::new(*token, payout));
-                }
                 rewards_out.push(payout);
+            }
+            // Match Solidity order: emit all events, then transfer all
+            for (token, payout) in reward_tokens.iter().zip(rewards_out.iter()) {
+                if !payout.is_zero() {
+                    log::emit(CollectRewardFee::new(*token, *payout));
+                }
+            }
+            // Transfer all rewards
+            for (token, payout) in reward_tokens.iter().zip(rewards_out.iter()) {
+                if !payout.is_zero() {
+                    this.transfer_reward_out(*token, treasury, *payout)?;
+                }
             }
             let interest_out = this.post_expiry_total_sy_interest_for_treasury.read();
             if !interest_out.is_zero() {
@@ -691,23 +798,42 @@ impl PendleYieldToken {
                 this.transfer_sy_out(treasury, interest_out)?;
                 log::emit(CollectInterestFee::new(interest_out));
             }
+            // Match Solidity's updateData modifier: update SY reserve at the end
+            this.update_sy_reserve();
             Ok((interest_out, rewards_out))
         })
     }
 
     pub fn setPostExpiryData(&mut self) -> Result<(), YTError> {
-        self.check_expired()?;
+        // Match Solidity behavior: silently does nothing if not expired
         self.non_reentrant(|this| {
-            this.set_post_expiry_once()
+            if this.isExpired() {
+                this.set_post_expiry_once()?;
+            }
+            Ok(())
         })
     }
 
 }
 
+// NOTE: no `self_address_from_create()` helper.
+// Use `eth_riscv_runtime::tx::address()` (EVM `ADDRESS`, 0x30) instead.
+
 // -----------------------------------------------------------------------------
 // Internal helpers (non-ABI)
 // -----------------------------------------------------------------------------
 impl PendleYieldToken {
+    fn before_token_transfer(&mut self, from: Address, to: Address, amount: U256) -> Result<(), YTError> {
+        let _ = amount; // unused but matches signature intent
+        let now = eth_riscv_runtime::block::timestamp();
+        if self.expiry.read() <= now {
+            self.set_post_expiry_once()?;
+        }
+        self.distribute_rewards_for_two(from, to)?;
+        self.distribute_interest_for_two(from, to)?;
+        Ok(())
+    }
+
     fn update_data(&mut self) -> Result<(), YTError> {
         let now = eth_riscv_runtime::block::timestamp();
         if self.expiry.read() <= now {
@@ -731,7 +857,7 @@ impl PendleYieldToken {
         let mut sy = IStandardizedYield::new(self.sy.read()).with_ctx(&mut *self);
         let current_reward_indexes = sy.rewardIndexesCurrent().expect("SY.rewardIndexesCurrent failed");
         let reward_tokens = sy.getRewardTokens().expect("SY.getRewardTokens failed");
-        let first_index = self.py_index_stored.read();
+        let first_index = self.py_index_current_internal()?;
         self.post_expiry_first_py_index.write(first_index);
         for (i, token) in reward_tokens.into_iter().enumerate() {
             let idx = current_reward_indexes.get(i).cloned().unwrap_or(U256::ZERO);
@@ -831,15 +957,13 @@ impl PendleYieldToken {
         sy.claimRewards(contract_addr);
         Ok(())
     }
-    fn reward_shares_user(&self, user: Address, current_py_index: U256) -> U256 {
-        if current_py_index.is_zero() {
+    fn reward_shares_user(&self, user: Address) -> U256 {
+        let index = self.user_interest_index[user].read();
+        if index.is_zero() {
             return U256::ZERO;
         }
         let bal = self.balance_of[user].read();
-        if bal.is_zero() {
-            return self.user_interest_accrued[user].read();
-        }
-        let sy_equiv = bal * ONE / current_py_index;
+        let sy_equiv = bal * ONE / index;
         sy_equiv + self.user_interest_accrued[user].read()
     }
 
@@ -860,12 +984,11 @@ impl PendleYieldToken {
         if tokens.is_empty() {
             return Ok(());
         }
-        let current_py_index = self.py_index_stored.read();
         if user1 != Address::ZERO && user1 != self.this_address.read() {
-            self.distribute_rewards_private(user1, &tokens, &indexes, current_py_index)?;
+            self.distribute_rewards_private(user1, &tokens, &indexes)?;
         }
         if user2 != Address::ZERO && user2 != self.this_address.read() && user2 != user1 {
-            self.distribute_rewards_private(user2, &tokens, &indexes, current_py_index)?;
+            self.distribute_rewards_private(user2, &tokens, &indexes)?;
         }
         Ok(())
     }
@@ -875,9 +998,8 @@ impl PendleYieldToken {
         user: Address,
         tokens: &[Address],
         indexes: &[U256],
-        current_py_index: U256,
     ) -> Result<(), YTError> {
-        let shares = self.reward_shares_user(user, current_py_index);
+        let shares = self.reward_shares_user(user);
         if shares.is_zero() {
             return Ok(());
         }
@@ -888,7 +1010,7 @@ impl PendleYieldToken {
             }
             let user_idx = self.user_reward_index[*token][user].read();
             let effective_user_idx = if user_idx.is_zero() { U256::from(1u64) } else { user_idx };
-            if idx <= effective_user_idx {
+            if idx == effective_user_idx {
                 continue;
             }
             let delta = idx - effective_user_idx;
@@ -928,7 +1050,7 @@ impl PendleYieldToken {
             self.user_interest_index[user].write(current_index);
             return;
         }
-        let num = principal * (current_index - prev);
+        let num = principal * (current_index - prev) * ONE;
         let denom = prev * current_index;
         if denom.is_zero() {
             return;
@@ -986,6 +1108,7 @@ impl PendleYieldToken {
         if from == to {
             return Err(YTError::SelfTransfer);
         }
+        self.before_token_transfer(from, to, amount)?;
         let from_balance = self.balance_of[from].read();
         if from_balance < amount {
             return Err(YTError::InsufficientBalance(from_balance));
@@ -1011,6 +1134,7 @@ impl PendleYieldToken {
         if account == Address::ZERO {
             return Err(YTError::ZeroAddress);
         }
+        self.before_token_transfer(Address::ZERO, account, amount)?;
         let supply = self.total_supply.read();
         self.total_supply.write(supply + amount);
         let bal = self.balance_of[account].read();
@@ -1023,6 +1147,7 @@ impl PendleYieldToken {
         if account == Address::ZERO {
             return Err(YTError::ZeroAddress);
         }
+        self.before_token_transfer(account, Address::ZERO, amount)?;
         let bal = self.balance_of[account].read();
         if bal < amount {
             return Err(YTError::InsufficientBalance(bal));
