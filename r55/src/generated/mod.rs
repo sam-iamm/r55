@@ -5,9 +5,14 @@ use alloy_core::primitives::Bytes;
 use core::include_bytes;
 
 pub const HYDRA_BRIDGED_ERC20_BYTECODE: &[u8] = include_bytes!("../../../r55-output-bytecode/hydra-bridged-erc20.bin");
+pub const ERC721_BYTECODE: &[u8] = include_bytes!("../../../r55-output-bytecode/erc721.bin");
+pub const DELEGATECALL_IMPL_BYTECODE: &[u8] = include_bytes!("../../../r55-output-bytecode/delegatecall-impl.bin");
 pub const ERC1967_PROXY_BYTECODE: &[u8] = include_bytes!("../../../r55-output-bytecode/erc1967-proxy.bin");
 pub const HYDRA_SIGNAL_SERVICE_BYTECODE: &[u8] = include_bytes!("../../../r55-output-bytecode/hydra-signal-service.bin");
+pub const PENDLE_YIELD_CONTRACT_FACTORY_BYTECODE: &[u8] = include_bytes!("../../../r55-output-bytecode/pendle-yield-contract-factory.bin");
+pub const EVM_CALLER_BYTECODE: &[u8] = include_bytes!("../../../r55-output-bytecode/evm-caller.bin");
 pub const ERC20_BYTECODE: &[u8] = include_bytes!("../../../r55-output-bytecode/erc20.bin");
+pub const HYDRA_ERC20_BRIDGE_BYTECODE: &[u8] = include_bytes!("../../../r55-output-bytecode/hydra-erc20-bridge.bin");
 pub const ERC20X_BYTECODE: &[u8] = include_bytes!("../../../r55-output-bytecode/erc20x.bin");
 pub const HYDRA_ERC721_BYTECODE: &[u8] = include_bytes!("../../../r55-output-bytecode/hydra-erc721.bin");
 pub const HYDRA_L1_STATE_ROOT_BYTECODE: &[u8] = include_bytes!("../../../r55-output-bytecode/hydra-l1-state-root.bin");
@@ -26,9 +31,14 @@ pub const DELEGATECALL_TARGET_BYTECODE: &[u8] = include_bytes!("../../../r55-out
 pub fn get_bytecode(contract_name: &str) -> Bytes {
     let initcode = match contract_name {
         "hydra_bridged_erc20" => HYDRA_BRIDGED_ERC20_BYTECODE,
+        "erc721" => ERC721_BYTECODE,
+        "delegatecall_impl" => DELEGATECALL_IMPL_BYTECODE,
         "erc1967_proxy" => ERC1967_PROXY_BYTECODE,
         "hydra_signal_service" => HYDRA_SIGNAL_SERVICE_BYTECODE,
+        "pendle_yield_contract_factory" => PENDLE_YIELD_CONTRACT_FACTORY_BYTECODE,
+        "evm_caller" => EVM_CALLER_BYTECODE,
         "erc20" => ERC20_BYTECODE,
+        "hydra_erc20_bridge" => HYDRA_ERC20_BRIDGE_BYTECODE,
         "erc20x" => ERC20X_BYTECODE,
         "hydra_erc721" => HYDRA_ERC721_BYTECODE,
         "hydra_l1_state_root" => HYDRA_L1_STATE_ROOT_BYTECODE,

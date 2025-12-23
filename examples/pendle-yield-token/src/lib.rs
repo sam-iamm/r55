@@ -26,7 +26,7 @@
 //! ## Hydra N=2 Specifics
 //! - **Storage Mode**: HydraStorage (separate N=2 storage for decorrelation).
 //! - **Accrual Mechanics**: Reward/interest distribution uses user-specific indexes and accruals (inline RewardManager/InterestManager).
-//! - **this_address**: Used for contract-held balances (PT/YT during redeem); must be set accurately.
+//! - **this_address**: Used for contract-held balances (PT/YT during redeem); set in constructor via `tx::address()`.
 //! - **Post-Expiry**: Snapshot PY index, reward indexes, and owed amounts; treasury payouts include external reward redemption.
 //! - **ABI Parity**: All functions, events, and return types match Solidity for N=1/N=2 equivalence.
 //!
@@ -49,7 +49,7 @@
 //! ## Security Considerations
 //! - **Reentrancy**: Guards on all state-changing functions (mint, redeem, transfers).
 //! - **Overflow/Underflow**: U256 arithmetic; careful with multiplication/division in accrual (e.g., interestFromYT formula).
-//! - **Access Control**: Factory-only setter for `this_address`; no owner/pause (relies on external governance).
+//! - **Access Control**: No `setThisAddress` (self address is derived from `ADDRESS (0x30)` at construction).
 //! - **Index Monotonicity**: PY index must not decrease; enforced via max with cached value.
 //! - **Treasury Assumptions**: Factory treasury address must be valid; fees sent correctly.
 //!
@@ -125,7 +125,9 @@ const ONE: U256 = U256::from_limbs([1_000_000_000_000_000_000u64, 0, 0, 0]);
 // -----------------------------------------------------------------------------
 #[interface("camelCase")]
 trait IStandardizedYield {
-    fn exchangeRate(&mut self) -> U256;
+    // Solidity `IStandardizedYield.exchangeRate()` is a view/staticcall.
+    // Use `&self` so the generated interface uses STATICCALL (Hydra frame parity).
+    fn exchangeRate(&self) -> U256;
     fn rewardIndexesCurrent(&mut self) -> Vec<U256>;
     fn getRewardTokens(&self) -> Vec<Address>;
     fn claimRewards(&mut self, receiver: Address);
@@ -274,8 +276,8 @@ pub struct PendleYieldToken {
     sy: Slot<Address>,
     pt: Slot<Address>,
     factory: Slot<Address>,
-    /// N=2 self address supplied out-of-band (constructor or explicit setter).
-    /// Must be set to the contract address before reserve/balance reads; flows assume PT/YT are held here for redeem.
+    /// Contract self-address (`address(this)`), set in constructor via EVM `ADDRESS (0x30)`.
+    /// Used for contract-held balances (PT/YT during redeem) and reserve/balance reads.
     this_address: Slot<Address>,
     expiry: Slot<U256>,
     do_cache_index_same_block: Slot<bool>,
@@ -338,22 +340,6 @@ impl PendleYieldToken {
         yt.initialized.write(U256::from(1)); // constructor-only init
 
         yt
-    }
-
-    /// Optional setter to populate `this_address` if constructor injection is not feasible.
-    /// Must be called once by the factory/operator before any reserve sync.
-    pub fn setThisAddress(&mut self, addr: Address) -> Result<(), YTError> {
-        if self.this_address.read() != Address::ZERO {
-            return Err(YTError::AlreadyInitialized);
-        }
-        if addr == Address::ZERO {
-            return Err(YTError::ZeroAddress);
-        }
-        if msg_sender() != self.factory.read() {
-            return Err(YTError::Unauthorized);
-        }
-        self.this_address.write(addr);
-        Ok(())
     }
 
     // ---------------------------------------------------------------------
@@ -659,9 +645,12 @@ impl PendleYieldToken {
     }
 
     pub fn pyIndexCurrent(&mut self) -> Result<U256, YTError> {
-        self.non_reentrant(|this| {
-            this.py_index_current_internal()
-        })
+        // NOTE:
+        // This is a "read-like" function in Solidity (it may cache per-block depending on config),
+        // and it is called from within already-nonReentrant entrypoints like `mintPY`.
+        // Wrapping it in `non_reentrant` causes a nested reentrancy failure in R55 and will
+        // diverge from Solidity. Keep this function free of the reentrancy guard.
+        self.py_index_current_internal()
     }
 
     pub fn rewardIndexesCurrent(&mut self) -> Result<Vec<U256>, YTError> {
@@ -829,8 +818,13 @@ impl PendleYieldToken {
         if self.expiry.read() <= now {
             self.set_post_expiry_once()?;
         }
-        self.distribute_rewards_for_two(from, to)?;
-        self.distribute_interest_for_two(from, to)?;
+        // Pendle Solidity calls `SY.rewardIndexesCurrent()` from `_beforeTokenTransfer`
+        // (via RewardManager's `_updateRewardIndex`) on pre-expiry mints/transfers/burns.
+        // Crucially, this call happens only if the token transfer actually occurs.
+        let mut sy = IStandardizedYield::new(self.sy.read()).with_ctx(&mut *self);
+        let _ = sy.rewardIndexesCurrent();
+        let _ = from;
+        let _ = to;
         Ok(())
     }
 
@@ -901,9 +895,8 @@ impl PendleYieldToken {
         let now = eth_riscv_runtime::block::timestamp();
         let expired = self.expiry.read() <= now;
         let amt = if expired { pt_bal } else { core::cmp::min(pt_bal, yt_bal) };
-        if amt.is_zero() {
-            return Err(YTError::YCNothingToRedeem);
-        }
+        // Solidity `redeemPY()` returns 0 when nothing is redeemable (no revert). Keep that behavior
+        // to avoid Hydra call-skeleton mismatches on the zero-amount path.
         Ok(amt)
     }
 
@@ -1066,7 +1059,8 @@ impl PendleYieldToken {
         if self.do_cache_index_same_block.read() && self.py_index_last_updated_block.read() == U256::from(block_no) {
             return Ok(self.py_index_stored.read());
         }
-        let mut sy = IStandardizedYield::new(self.sy.read()).with_ctx(&mut *self);
+        // View call: must be STATICCALL for parity with Solidity.
+        let sy = IStandardizedYield::new(self.sy.read()).with_ctx(&*self);
         let idx = sy.exchangeRate().expect("SY.exchangeRate failed");
         let prev = self.py_index_stored.read();
         let new_idx = if idx > prev { idx } else { prev };

@@ -169,11 +169,15 @@ pub struct Approval {
 pub enum SYError {
     InvalidTokenIn(Address),
     InvalidTokenOut(Address),
+    ZeroAddress,
+    SelfTransfer,
     ZeroDeposit,
     ZeroRedeem,
     InsufficientSharesOut(U256, U256),
     InsufficientTokenOut(U256, U256),
     ReentrantCall,
+    NotOwner,
+    Paused,
 }
 
 // Storage
@@ -183,6 +187,8 @@ pub struct StandardizedYield {
     decimals: Slot<U256>,
     /// Cached self address (used for custody transfers / internal burns).
     this_address: Slot<Address>,
+    owner: Slot<Address>,
+    paused: Slot<bool>,
     name: DynamicSlot<String>,
     symbol: DynamicSlot<String>,
     totalSupply: Slot<U256>,
@@ -215,16 +221,40 @@ impl StandardizedYield {
         symbol: String,
         yieldToken: Address,
         decimals: U256,
+        owner: Address,
     ) -> Self {
         let mut sy = StandardizedYield::default();
         sy.yieldToken.write(yieldToken);
         sy.this_address.write(tx::address());
         sy.decimals.write(decimals);
+        sy.owner.write(owner);
+        sy.paused.write(false);
         sy.name.write(name);
         sy.symbol.write(symbol);
         sy.reentrancy_status.write(NOT_ENTERED);
         sy.initialized.write(U256::from(1));
         sy
+    }
+
+    // Pausable (mirrors SYBase: pause/unpause are onlyOwner; token movements are blocked while paused).
+    pub fn paused(&self) -> bool {
+        self.paused.read()
+    }
+
+    pub fn pause(&mut self) -> Result<(), SYError> {
+        if msg_sender() != self.owner.read() {
+            return Err(SYError::NotOwner);
+        }
+        self.paused.write(true);
+        Ok(())
+    }
+
+    pub fn unpause(&mut self) -> Result<(), SYError> {
+        if msg_sender() != self.owner.read() {
+            return Err(SYError::NotOwner);
+        }
+        self.paused.write(false);
+        Ok(())
     }
 
     // ERC20-like functions
@@ -294,7 +324,7 @@ impl StandardizedYield {
             if amountSharesOut < minSharesOut {
                 return Err(SYError::InsufficientSharesOut(amountSharesOut, minSharesOut));
             }
-            this._mint(receiver, amountSharesOut);
+            this._mint(receiver, amountSharesOut)?;
             log::emit(Deposit::new(msg_sender(), receiver, tokenIn, amountTokenToDeposit, amountSharesOut));
             Ok(amountSharesOut)
         })
@@ -310,9 +340,9 @@ impl StandardizedYield {
         self.non_reentrant(|this| {
             if burnFromInternalBalance {
                 // Match SYBase behavior: burn from address(this)
-                this._burn(this.this_address.read(), amountSharesToRedeem);
+                this._burn(this.this_address.read(), amountSharesToRedeem)?;
             } else {
-                this._burn(msg_sender(), amountSharesToRedeem);
+                this._burn(msg_sender(), amountSharesToRedeem)?;
             }
             let amountTokenOut = this._redeem(receiver, tokenOut, amountSharesToRedeem);
             if amountTokenOut < minTokenOut {
@@ -420,45 +450,70 @@ impl StandardizedYield {
         result
     }
 
+    // PendleERC20 parity:
+    // - `_transfer` forbids zero-address and self-transfer.
+    // - `_mint`/`_burn` are separate and also forbid zero-address.
+    // - Pause gating is applied to all token movements (transfer/mint/burn), matching SYBase
+    //   `_beforeTokenTransfer(...) whenNotPaused`.
     fn _transfer(&mut self, from: Address, to: Address, amount: U256) -> Result<(), SYError> {
-        if from.is_zero() || to.is_zero() {
-            // Handle mint/burn
-            if from.is_zero() {
-                let new_supply = self.totalSupply.read() + amount;
-                self.totalSupply.write(new_supply);
-                let to_balance = self.balance_of[to].read() + amount;
-                self.balance_of[to].write(to_balance);
-            } else if to.is_zero() {
-                let from_balance = self.balance_of[from].read();
-                if from_balance < amount {
-                    return Err(SYError::InsufficientTokenOut(from_balance, amount));
-                }
-                self.balance_of[from].write(from_balance - amount);
-                let new_supply = self.totalSupply.read() - amount;
-                self.totalSupply.write(new_supply);
-            }
-        } else {
-            let from_balance = self.balance_of[from].read();
-            if from_balance < amount {
-                return Err(SYError::InsufficientTokenOut(from_balance, amount));
-            }
-            self.balance_of[from].write(from_balance - amount);
-            let to_balance = self.balance_of[to].read() + amount;
-            self.balance_of[to].write(to_balance);
+        if self.paused.read() {
+            return Err(SYError::Paused);
         }
+        if from.is_zero() || to.is_zero() {
+            return Err(SYError::ZeroAddress);
+        }
+        if from == to {
+            return Err(SYError::SelfTransfer);
+        }
+        let from_balance = self.balance_of[from].read();
+        if from_balance < amount {
+            return Err(SYError::InsufficientTokenOut(from_balance, amount));
+        }
+        self.balance_of[from].write(from_balance - amount);
+        let to_balance = self.balance_of[to].read() + amount;
+        self.balance_of[to].write(to_balance);
         log::emit(Transfer::new(from, to, amount));
         Ok(())
     }
 
     fn _mint(&mut self, account: Address, amount: U256) -> Result<(), SYError> {
-        self._transfer(Address::ZERO, account, amount)
+        if self.paused.read() {
+            return Err(SYError::Paused);
+        }
+        if account.is_zero() {
+            return Err(SYError::ZeroAddress);
+        }
+        let new_supply = self.totalSupply.read() + amount;
+        self.totalSupply.write(new_supply);
+        let to_balance = self.balance_of[account].read() + amount;
+        self.balance_of[account].write(to_balance);
+        log::emit(Transfer::new(Address::ZERO, account, amount));
+        Ok(())
     }
 
     fn _burn(&mut self, account: Address, amount: U256) -> Result<(), SYError> {
-        self._transfer(account, Address::ZERO, amount)
+        if self.paused.read() {
+            return Err(SYError::Paused);
+        }
+        if account.is_zero() {
+            return Err(SYError::ZeroAddress);
+        }
+        let from_balance = self.balance_of[account].read();
+        if from_balance < amount {
+            return Err(SYError::InsufficientTokenOut(from_balance, amount));
+        }
+        self.balance_of[account].write(from_balance - amount);
+        let new_supply = self.totalSupply.read() - amount;
+        self.totalSupply.write(new_supply);
+        log::emit(Transfer::new(account, Address::ZERO, amount));
+        Ok(())
     }
 
     fn _approve(&mut self, owner: Address, spender: Address, amount: U256) -> Result<(), SYError> {
+        // PendleERC20: approve from/to zero address is forbidden.
+        if owner.is_zero() || spender.is_zero() {
+            return Err(SYError::ZeroAddress);
+        }
         self.allowance_of[owner][spender].write(amount);
         log::emit(Approval::new(owner, spender, amount));
         Ok(())

@@ -68,7 +68,7 @@ macro_rules! syscalls {
 // t0: 0x5A, opcode for gas (gasleft), returns 64-bit remaining gas in a0
 // t0: 0xf0, opcode for create, args: a0: 64-bit value, a1: calldata offset, a2: calldata size, returns an address
 // t0: 0xf1, opcode for call, args: a0-a2: address, a3: 64-bit value, a4: calldata offset, a5: calldata size
-// t0: 0xf4, opcode for delegatecall, args: a0-a2: address, a3: MUST be 0, a4: calldata offset, a5: calldata size
+// t0: 0xf4, opcode for delegatecall, args: a0-a2: address, a3: calldata offset, a4: calldata size
 // t0: 0xfa, opcode for staticcall, args: a0-a2: address, a3: 64-bit value, a4: calldata offset, a5: calldata size
 // t0: 0xf3, opcode for return, a0: memory address of data, a1: length of data in bytes, doesn't return
 // t0: 0xfd, opcode for revert, doesn't return
