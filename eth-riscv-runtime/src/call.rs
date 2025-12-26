@@ -131,7 +131,7 @@ pub fn delegatecall(addr: Address, data_offset: u64, data_size: u64) {
         asm!(
             "ecall",
             in("a0") addr[0], in("a1") addr[1], in("a2") addr[2],
-            in("a4") data_offset, in("a5") data_size,
+            in("a3") data_offset, in("a4") data_size,
             in("t0") u8::from(Syscall::DelegateCall)
         );
     }
